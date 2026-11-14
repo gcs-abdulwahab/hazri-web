@@ -30,7 +30,8 @@ var ui={auth:'loading',email:'',userId:null,authError:'',loading:false,loadError
   view:'home',cid:null,tab:'mark',mode:'tap',date:todayISO(),period:'all',shortOnly:false,
   quick:'',qWho:'present',qOthers:true,save:'idle',confirm:null,lastKey:'',
   asg:{email:'',from:'',msg:''},imp:null,admin:null,adm:{rows:null,loading:false,err:'',group:'section',teacher:'',list:null,newEmail:'',msg:''},admC:null,
-  draft:null,lastTop:'home',cFilter:'First Year',tp:{list:null,err:'',name:'',dept:'',email:'',pass:'123456',msg:'',busy:false,open:'',cid:'',from:'',armed:''},addText:'',gen:{from:'',to:'',step:'1',skip:''}};
+  draft:null,lastTop:'home',cFilter:'First Year',tp:{list:null,err:'',name:'',dept:'',email:'',pass:'123456',msg:'',busy:false,open:'',cid:'',from:'',armed:'',secK:'',subSel:''},addText:'',gen:{from:'',to:'',step:'1',skip:''},
+  secM:{filterProg:'all',filterYear:'First Year',openSec:'',createOpen:false,createHead:'',createName:'',createMsg:'',renameOpen:false,renameVal:'',renameMsg:'',delConfirm:false,stAddOpen:false,stRoll:'',stName:'',stMsg:'',bulkOpen:false,bulkText:'',editRoll:null,editRollVal:'',editNameVal:'',armedRoll:null,tPickOpen:false,tFrom:todayISO(),selectedTids:{},tMsg:'',subSel:''}};
 var YEARS=['First Year','Second Year'];
 var PROGRAMS_BUILTIN=['FSc Pre-Engineering','FSc Pre-Medical','ICS Physics','ICS Statistics','ICS Economics','I.Com','FA General Science','FA Humanities'];
 var PROGRAM_SUBJECTS={'FSc Pre-Engineering':['Physics','Chemistry','Mathematics'],'FSc Pre-Medical':['Physics','Chemistry','Biology'],
@@ -203,9 +204,16 @@ function saveEntry(){
   c.students.forEach(function(st){var raw=String(E.att[st.id]==null?'':E.att[st.id]).trim();if(raw===''){blank++;return;}var v=parseInt(raw,10);
     if(isNaN(v)||String(v)!==raw||v<0)bad=bad||'Roll '+st.roll+': enter a whole number.';else if(v>d)bad=bad||'Roll '+st.roll+': '+v+' is more than the '+d+' lectures delivered.';else att[st.id]=v;});
   if(bad){toast(bad);return;}
+  var oldAtt=(mtOf(c.id,E.m)&&mtOf(c.id,E.m).att)||{};
+  var changes={};
+  c.students.forEach(function(st){
+    var oldV=oldAtt[st.id]==null?'':String(oldAtt[st.id]);
+    var newV=att[st.id]==null?'':String(att[st.id]);
+    if(oldV!==newV)changes[st.id]=(newV===''?null:parseInt(newV,10));
+  });
   var row={delivered:d,att:att,by:ui.email,at:new Date().toISOString()},cid=c.id,m=E.m;
   (S.mt[cid]||(S.mt[cid]={}))[m]=row;E.dirty=false;
-  run(async function(){chk(await sb.from('monthly_totals').upsert({class_id:cid,month:m,delivered:d,attended:att,updated_by:ui.email,updated_at:row.at},{onConflict:'class_id,month'}));});
+  run(async function(){chk(await sb.rpc('save_month',{p_class:cid,p_month:m,p_delivered:d,p_changes:changes}));});
   render();toast(blank?'Saved. '+blank+' student'+(blank===1?' is':'s are')+' still blank.':'Saved. '+c.students.length+' students entered.');
 }
 function regMonthsView(c){
@@ -228,25 +236,19 @@ function blankDraft(){return {year:'',prog:'',name:'',subjects:[],subIn:'',secti
 function isMgr(){return !!(ui.admin&&(ui.admin.manager||ui.admin.super));}
 function myAssign(c,date){return (c.assign||[]).some(function(a){return a.email===ui.email&&a.from<=date&&(!a.to||date<=a.to);});}
 function dayBy(cid,date){return (S.by&&S.by[cid]&&S.by[cid][date])||'';}
-/* Months the registrar has closed: teachers can neither see nor mark them. */
-function isClosed(d){return !!(S.closed&&S.closed[String(d).slice(0,7)]);}
-function closedFor(d){return !isMgr()&&isClosed(d);}
-function closedNote(d){return fmtMonth(String(d).slice(0,7))+' is closed by the registrar.';}
-function teacherMinDate(){var cur=todayISO().slice(0,7),last='';Object.keys(S.closed||{}).forEach(function(m){if(m<=cur&&m>last)last=m;});if(!last)return '';var p=last.split('-').map(Number);return iso(new Date(p[0],p[1],1));}
+/* Months the registrar has closed: closed_months table does not exist. */
+function isClosed(d){return false;}
+function closedFor(d){return false;}
+function closedNote(d){return '';}
+function teacherMinDate(){return '';}
 function canEdit(c,date){
   if(isMgr())return true;
-  if(isClosed(date))return false;
   if(isFuture(date))return false;
-  var by=dayBy(c.id,date);
-  if(by)return by===ui.email;
-  if(Object.keys(dayOf(c.id,date)).length)return true;
   if(ui.noAssign)return true;
   return myAssign(c,date);
 }
 function lockReason(c,date){
-  if(isClosed(date))return closedNote(date)+' Ask a manager if a change is needed.';
-  var by=dayBy(c.id,date);
-  if(by&&by!==ui.email)return 'This day was marked by '+by+'. Only that teacher or a manager can change it.';
+  if(isFuture(date))return 'Future dates cannot be marked.';
   return 'You are not assigned to this class on this date, so you can only view it.';
 }
 function cls(){return ui.view==='adminclass'?ui.admC:S.classes[ui.cid];}
@@ -276,12 +278,30 @@ function encodeDay(c,day){
   c.students.forEach(function(s){if(day[s.id])arr[s.idx]=day[s.id];});
   return arr.join('');
 }
+var dayChanges={};
+function recordDayChange(cid,date,sid,v){
+  var k=cid+'|'+date;
+  (dayChanges[k]||(dayChanges[k]={}))[sid]=v||'';
+}
 async function saveDay(cid,date){
-  var c=S.classes[cid];if(!c)return;
-  var marks=encodeDay(c,(S.att[cid]&&S.att[cid][date])||{});
-  if(!marks){chk(await sb.from('attendance_days').delete().eq('class_id',cid).eq('day',date));}
-  else{chk(await sb.from('attendance_days').upsert({class_id:cid,day:date,marks:marks,updated_at:new Date().toISOString()},{onConflict:'class_id,day'}));
-    var bm=(S.by||(S.by={}));(bm[cid]||(bm[cid]={}));if(!bm[cid][date])bm[cid][date]=ui.email;}
+  var k=cid+'|'+date;
+  var currentChanges=dayChanges[k];
+  if(!currentChanges||!Object.keys(currentChanges).length)return;
+  var toSend=Object.assign({},currentChanges);
+  try{
+    chk(await sb.rpc('save_day',{p_class:cid,p_day:date,p_changes:toSend}));
+    if(dayChanges[k]){
+      Object.keys(toSend).forEach(function(sid){
+        if(dayChanges[k][sid]===toSend[sid])delete dayChanges[k][sid];
+      });
+      if(!Object.keys(dayChanges[k]).length)delete dayChanges[k];
+    }
+    var bm=(S.by||(S.by={}));(bm[cid]||(bm[cid]={}));
+    bm[cid][date]=ui.email;
+  }catch(e){
+    // Keep unsaved changes in dayChanges[k] and re-throw so run() displays error toast
+    throw e;
+  }
 }
 function persistDay(cid,date){
   var k=cid+'|'+date;setSave('saving');clearTimeout(dayTimers[k]);
@@ -308,17 +328,8 @@ function dbCreateClass(c){
 function dbUpdateClass(c){
   run(async function(){chk(await sb.from('classes').update({name:c.name,subject:c.subject||'',threshold:c.threshold,leave_as_present:c.leaveAsPresent}).eq('id',c.id));});
 }
-function dbAddStudents(c,list){
-  run(async function(){
-    await insertStudents(c.id,list);
-    chk(await sb.from('classes').update({next_idx:c.nextIdx}).eq('id',c.id));
-  });
-}
 function dbUpdateStudent(s){
   run(async function(){chk(await sb.from('students').update({roll:s.roll,name:s.name||''}).eq('id',s.id));});
-}
-function dbDeleteStudent(id){
-  run(async function(){chk(await sb.from('students').delete().eq('id',id));});
 }
 function dbDeleteClass(id){
   run(async function(){chk(await sb.from('classes').delete().eq('id',id));});
@@ -338,13 +349,20 @@ async function fetchAll(table,orders){
   return out;
 }
 async function loadAll(){
-  var res=await Promise.all([fetchAll('classes',['id']),fetchAll('students',['id']),fetchAll('attendance_days',['class_id','day']),fetchAll('class_teachers',['id']).catch(function(){return null;}),fetchAll('closed_months',['month']).catch(function(){return null;}),fetchAll('programs',['sort_no','name']).catch(function(){return null;}),fetchAll('attendance_months',['month']).catch(function(){return null;}),fetchAll('monthly_totals',['class_id','month']).catch(function(){return null;})]);
-  var next={classes:{},att:{},by:{},closed:{}};
-  ui.noMonthly=(res[6]===null||res[7]===null);next.months={};next.mt={};
-  (res[6]||[]).forEach(function(r){next.months[r.month]=!!r.open;});
-  (res[7]||[]).forEach(function(r){(next.mt[r.class_id]||(next.mt[r.class_id]={}))[r.month]={delivered:r.delivered||0,att:r.attended||{},by:r.updated_by||'',at:r.updated_at||''};});
-  ui.noPrograms=(res[5]===null);next.programs=(res[5]||[]).map(function(p){return {id:p.id,name:p.name,subjects:p.subjects||[],core:p.core!==false,sort_no:p.sort_no||0};});
-  ui.noLocks=(res[4]===null);(res[4]||[]).forEach(function(r){next.closed[r.month]=1;});
+  var res=await Promise.all([
+    fetchAll('classes',['id']),
+    fetchAll('students',['id']),
+    fetchAll('attendance_days',['class_id','day']),
+    fetchAll('class_teachers',['id']).catch(function(){return null;}),
+    fetchAll('programs',['sort_no','name']).catch(function(){return null;}),
+    fetchAll('attendance_months',['month']).catch(function(){return null;}),
+    fetchAll('monthly_totals',['class_id','month']).catch(function(){return null;})
+  ]);
+  var next={classes:{},att:{},by:{}};
+  ui.noMonthly=(res[5]===null||res[6]===null);next.months={};next.mt={};
+  (res[5]||[]).forEach(function(r){next.months[r.month]=!!r.open;});
+  (res[6]||[]).forEach(function(r){(next.mt[r.class_id]||(next.mt[r.class_id]={}))[r.month]={delivered:r.delivered||0,att:r.attended||{},by:r.updated_by||'',at:r.updated_at||''};});
+  ui.noPrograms=(res[4]===null);next.programs=(res[4]||[]).map(function(p){return {id:p.id,name:p.name,subjects:p.subjects||[],core:p.core!==false,sort_no:p.sort_no||0};});
   ui.noAssign=(res[3]===null);
   if(res[0].length)ui.canArchive=('archived_at' in res[0][0]);
   res[0].forEach(function(c){
@@ -357,7 +375,8 @@ async function loadAll(){
     var c=next.classes[d.class_id];if(!c)return;
     var m={};
     c.students.forEach(function(s){var ch=d.marks.charAt(s.idx);if(ch==='P'||ch==='A'||ch==='L')m[s.id]=ch;});
-    if(Object.keys(m).length){(next.att[c.id]||(next.att[c.id]={}))[d.day]=m;if(d.marked_by)(next.by[c.id]||(next.by[c.id]={}))[d.day]=d.marked_by;}
+    if(Object.keys(m).length){(next.att[c.id]||(next.att[c.id]={}))[d.day]=m;}
+    if(d.marked_by)(next.by[c.id]||(next.by[c.id]={}))[d.day]=d.marked_by;
   });
   S=next;
 }
@@ -401,13 +420,25 @@ function parseStudents(text,existing){
   var out=[],n=existing.length;
   text.split(/\r?\n/).map(function(l){return l.trim();}).filter(Boolean).forEach(function(line){
     var roll='',name='';
-    var parts=line.split(/\t|,|\|/).map(function(p){return p.trim();}).filter(Boolean);
-    if(parts.length>=2){
-      roll=parts[0];name=parts.slice(1).join(' ');
-      if(!/\d/.test(parts[0])&&/^\S*\d\S*$/.test(parts[1])){roll=parts[1];name=parts[0];}
+    if(line.indexOf('\t')>=0){
+      var tIdx=line.indexOf('\t');
+      var p1=line.slice(0,tIdx).trim(),p2=line.slice(tIdx+1).trim();
+      if(!/\d/.test(p1)&&/\d/.test(p2)){roll=p2;name=p1;}
+      else{roll=p1;name=p2;}
+    }else if(line.indexOf('|')>=0){
+      var barIdx=line.indexOf('|');
+      var b1=line.slice(0,barIdx).trim(),b2=line.slice(barIdx+1).trim();
+      if(!/\d/.test(b1)&&/\d/.test(b2)){roll=b2;name=b1;}
+      else{roll=b1;name=b2;}
+    }else if(/^(\S*\d\S*)\s*,\s*(.+)$/.test(line)){
+      var m1=line.match(/^(\S*\d\S*)\s*,\s*(.+)$/);
+      roll=m1[1];name=m1[2];
+    }else if(/^([^,]+?)\s*,\s*(\S*\d\S*)$/.test(line)){
+      var m2=line.match(/^([^,]+?)\s*,\s*(\S*\d\S*)$/);
+      roll=m2[2];name=m2[1];
     }else{
-      var m=line.match(/^(\S*\d\S*)\s+(.+)$/);
-      if(m){roll=m[1];name=m[2];}else{name=line;}
+      var m3=line.match(/^(\S*\d\S*)\s+(.+)$/);
+      if(m3){roll=m3[1];name=m3[2];}else{name=line;}
     }
     n++;if(!roll)roll=String(n);
     out.push({id:newId(),roll:roll.slice(0,40),name:name.slice(0,200)});
@@ -426,9 +457,17 @@ function newClass(name,subject,studentsText,genRolls){
 function setDay(cid,date,day){
   if(isFuture(date)){toast('Attendance cannot be marked for a future date.');return;}
   var gc=S.classes[cid];if(gc&&!canEdit(gc,date)){toast(lockReason(gc,date));return;}
+  var prev=(S.att[cid]&&S.att[cid][date])||{};
   var a=S.att[cid]||(S.att[cid]={}),clean={};
   Object.keys(day).forEach(function(k){if(day[k])clean[k]=day[k];});
   if(Object.keys(clean).length)a[date]=clean;else delete a[date];
+  if(gc&&gc.students){
+    gc.students.forEach(function(st){
+      var oldV=prev[st.id]||'';
+      var newV=clean[st.id]||'';
+      if(oldV!==newV)recordDayChange(cid,date,st.id,newV);
+    });
+  }
   persistDay(cid,date);
 }
 
@@ -517,9 +556,8 @@ function updateQuickPreview(){
 }
 
 /* ---------- reports ---------- */
-function monthsOf(c){var a=S.att[c.id]||{},m={};Object.keys(a).forEach(function(d){m[d.slice(0,7)]=1;});return Object.keys(m).filter(function(x){return !closedFor(x);}).sort().reverse();}
+function monthsOf(c){var a=S.att[c.id]||{},m={};Object.keys(a).forEach(function(d){m[d.slice(0,7)]=1;});return Object.keys(m).sort().reverse();}
 function sessionDates(c,period){
-  if(!isMgr()&&S.closed)return sessionDates0(c,period).filter(function(d){return !isClosed(d);});
   return sessionDates0(c,period);
 }
 function sessionDates0(c,period){
@@ -541,18 +579,8 @@ function csvCell(v){v=String(v==null?'':v);return /[",\n]/.test(v)?'"'+v.replace
 function mxMonths(){var m={};if(!ui.noMonthly&&Object.keys(S.months||{}).length)Object.keys(S.months).forEach(function(x){m[x]=1;});else m[curMonth()]=1;openMonths().forEach(function(x){m[x]=1;});Object.keys(S.mt||{}).forEach(function(cid){Object.keys(S.mt[cid]).forEach(function(x){m[x]=1;});});return Object.keys(m).filter(monthVisible).sort().reverse();}
 function lockBlock(){
   return '';
-  if(ui.noLocks)return '';
-  var m=ui.mx,cl=isClosed(m),all=Object.keys(S.closed||{}).sort().reverse();
-  return '<div class="row" style="align-items:center;justify-content:space-between;margin-top:10px"><p class="hint" style="margin:0">'+esc(fmtMonth(m))+': <b>'+(cl?'closed for teachers':'open to teachers')+'</b></p>'+
-    '<button class="btn small'+(cl?'':' danger')+'" data-act="mxlock">'+(cl?'Reopen for teachers':'Close for teachers')+'</button></div>'+
-    (all.length?'<p class="hint">Closed: '+all.map(function(x){return esc(fmtMonth(x));}).join(', ')+'. Teachers cannot see or mark these months. Managers still can.</p>':'');
 }
-function toggleMonth(){
-  var m=ui.mx;if(!isMgr()||ui.noLocks||!m)return;
-  if(isClosed(m)){delete S.closed[m];run(async function(){chk(await sb.from('closed_months').delete().eq('month',m));});toast(fmtMonth(m)+' reopened for teachers.');}
-  else{S.closed[m]=1;run(async function(){chk(await sb.from('closed_months').insert({month:m,closed_by:ui.email}));});toast(fmtMonth(m)+' closed. Teachers can no longer see or mark it.');}
-  render();
-}
+function toggleMonth(){}
 function monthExportCard(){
   if(!classList().length)return '';
   var ms=mxMonths();if(!ui.mx||ms.indexOf(ui.mx)<0)ui.mx=ms[0];
@@ -574,16 +602,17 @@ function exportMonth(){
   order.forEach(function(k){
     var g=groups[k],regs=g.regs.slice().sort(function(a,b){return (a.createdAt||0)-(b.createdAt||0)||(a.subject||'').localeCompare(b.subject||'');});
     var thr=regs[0].threshold==null?75:regs[0].threshold,rolls=[],names={},seen={};
-    regs.forEach(function(c){c.students.forEach(function(st){if(!seen[st.roll]){seen[st.roll]=1;rolls.push(st.roll);}if(st.name&&!names[st.roll])names[st.roll]=st.name;});});
+    regs.forEach(function(c){c.students.forEach(function(st){var rk=String(st.roll).trim();if(!seen[rk.toLowerCase()]){seen[rk.toLowerCase()]=1;rolls.push(rk);}if(st.name&&!names[rk.toLowerCase()])names[rk.toLowerCase()]=st.name;});});
+    rolls.sort(function(a,b){return a.localeCompare(b,undefined,{numeric:true});});
     var ents=regs.map(function(c){return mtOf(c.id,m);}),title=g.head+(g.sec?' · '+g.sec:'')+' · '+mName;
     var r1=['Roll','Name'],r2=['',''],merges=[{s:{r:0,c:0},e:{r:0,c:5+regs.length*3}},{s:{r:1,c:0},e:{r:2,c:0}},{s:{r:1,c:1},e:{r:2,c:1}}];
     regs.forEach(function(c,i){r1.push(c.subject||'Register','','');r2.push('Delivered','Attended','%');merges.push({s:{r:1,c:2+i*3},e:{r:1,c:4+i*3}});});
     var tc=2+regs.length*3;r1.push('Total','','','Below '+thr+'%');r2.push('Delivered','Attended','%','');merges.push({s:{r:1,c:tc},e:{r:1,c:tc+2}},{s:{r:1,c:tc+3},e:{r:2,c:tc+3}});
     var rows=[[title],r1,r2],low=0,TH=0,TP=0;
     rolls.forEach(function(roll){
-      var row=[roll,names[roll]||''],H=0,P=0;
+      var rk=roll.toLowerCase(),row=[roll,names[rk]||''],H=0,P=0;
       regs.forEach(function(c,i){
-        var st=c.students.filter(function(x){return x.roll===roll;})[0],e=ents[i],v=st&&e?e.att[st.id]:null;
+        var st=c.students.filter(function(x){return String(x.roll).trim().toLowerCase()===rk;})[0],e=ents[i],v=st&&e?e.att[st.id]:null;
         if(v==null){row.push('','','');return;}
         var d=e.delivered;H+=d;P+=v;
         row.push(d,v,d?Math.round(v/d*1000)/10:'');
@@ -595,7 +624,7 @@ function exportMonth(){
     var ws=XLSX.utils.aoa_to_sheet(rows);ws['!merges']=merges;
     ws['!cols']=[{wch:10},{wch:24}].concat(r1.slice(2).map(function(){return {wch:8};}));
     sheets.push([mxSheetName(g.head,g.sec,used),ws]);
-    sum.push([g.head,g.sec.replace(/^Section /,''),rolls.length,regs.length,ents.filter(function(x){return !x;}).length,TH?Math.round(TP/TH*1000)/10:'',low]);
+    sum.push([g.head,g.sec?g.sec.replace(/^Section /,''):'Whole class',rolls.length,regs.length,ents.filter(function(x){return !x;}).length,TH?Math.round(TP/TH*1000)/10:'',low]);
   });
   var ss=XLSX.utils.aoa_to_sheet(sum);ss['!cols']=[{wch:34},{wch:10},{wch:10},{wch:10},{wch:18},{wch:13},{wch:22}];
   XLSX.utils.book_append_sheet(wb,ss,'Summary');
@@ -680,6 +709,7 @@ var ICONS={
   home:'<path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
   att:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/><path d="M8.5 15l2 2 4-4"/>',
   classes:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v16"/>',
+  sections:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/>',
   teachers:'<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18.5 14.8c1.6.8 2.7 2.5 3 5.2"/>',
   assign:'<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5 1.6 0 3 .5 4.1 1.4"/><path d="M19 14v6M16 17h6"/>',
   reports:'<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
@@ -687,6 +717,7 @@ var ICONS={
 };
 function navItems(){
   var it=[{v:'home',label:'Dashboard'},{v:'att',label:'Attendance'},{v:'classes',label:isMgr()||ui.admin?'Classes':'My classes'}];
+  if(isMgr())it.push({v:'sections',label:'Sections',icon:'sections'});
   if(ui.admin)it.push({v:'teachers',label:'Teachers'});
   if(isMgr())it.push({v:'assign',label:'Assign'});
   if(ui.admin)it.push({v:'admin',label:'Reports',icon:'reports'});
@@ -698,6 +729,7 @@ function navSection(){
   if(v==='admin'||v==='adminclass')return 'admin';
   if(v==='attmonth'||v==='attentry')return 'att';
   if(v==='class'||v==='new'||v==='newsec')return ui.lastTop||'classes';
+  if(v==='sections'||v==='sectiondetail')return 'sections';
   return v;
 }
 function viewNav(){
@@ -926,29 +958,31 @@ function addStudentsForm(A,secs,inSection){
     '<label class="lbl"><span class="sr">New students</span><textarea id="asIn" placeholder="One per line: roll number, name&#10;31, Zainab Malik">'+esc(A.text)+'</textarea></label><p class="hint" id="asCount">'+asCountText()+'</p>'+genBlock(b.students):'')+
   '<div class="row"><button class="btn primary" data-act="asdo"'+(b?'':' disabled')+'>Add students</button><button class="btn" data-act="ascancel">Cancel</button></div></div>';
 }
-function addStudentsToSection(){
+async function addStudentsToSection(){
   var A=ui.as,b=asBase();if(!b){toast('Choose a section first.');return;}
   var gr=genResult(b.students);if(gr.error){toast(gr.msg);return;}
   var typed=parseStudents(A.text,b.students),list=[],seen={};
   typed.forEach(function(s){if(!seen[s.roll]){seen[s.roll]=1;list.push({roll:s.roll,name:s.name});}});
   gr.list.forEach(function(r){if(!seen[r]){seen[r]=1;list.push({roll:r,name:''});}});
   if(!list.length){toast('Type, paste or generate at least one student.');return;}
-  var regs=regsOf(A.head,A.sec),added=0,skipped=0;
-  regs.forEach(function(c,ri){
-    var have={};c.students.forEach(function(s){have[s.roll]=1;});safeNext(c);
-    var add=list.filter(function(s){return !have[s.roll];}).map(function(s){return {id:newId(),roll:s.roll,name:s.name||'',idx:c.nextIdx++};});
-    if(ri===0){added=add.length;skipped=list.length-add.length;}
-    if(add.length){c.students=c.students.concat(add);dbAddStudents(c,add);}
-  });
+  var secName=A.sec?(A.head+' · '+A.sec):A.head;
+  var added=0,failed=[];
+  for(var i=0;i<list.length;i++){
+    var r=await sb.rpc('add_student',{p_section:secName,p_roll:list[i].roll,p_name:list[i].name||''});
+    if(r.error)failed.push(list[i].roll+': '+(r.error.message||'failed'));
+    else added++;
+  }
   var where=A.sec||A.head;ui.as=null;resetGen();render();
-  toast(added+' student'+(added===1?'':'s')+' added to '+where+' in '+regs.length+' register'+(regs.length===1?'':'s')+'.'+(skipped?' '+skipped+' already there, skipped.':''));
+  if(failed.length)toast('Added '+added+' student'+(added===1?'':'s')+' to '+where+'. Errors: '+failed.join('; '));
+  else toast(added+' student'+(added===1?'':'s')+' added to '+where+'.');
+  if(added>0)await loadAll();
 }
 /* Edit or remove students once per section: a change applies to that roll number in every subject register. */
 function esStudents(E){var out=[],seen={};regsOf(E.head,E.sec).forEach(function(c){c.students.forEach(function(s){if(!seen[s.roll]){seen[s.roll]=1;out.push({roll:s.roll,name:s.name||''});}});});return out;}
 function editStudentsForm(E){
   var list=esStudents(E),nr=regsOf(E.head,E.sec).length;
   return '<div class="card merge" style="margin-bottom:10px"><h3>Edit students in '+esc(E.sec||E.head)+'</h3>'+
-  '<p class="hint">Changes and removals apply to all '+nr+' subject register'+(nr===1?'':'s')+'. Removing a student also removes their attendance marks.</p>'+
+  '<p class="hint">Changes and removals apply to all '+nr+' subject register'+(nr===1?'':'s')+'. Removing a student preserves attendance marks.</p>'+
   (list.length?'<ul class="list">'+list.map(function(s){var armed=E.armed===s.roll;
     return '<li class="srow-edit"><input class="r" data-field="esroll" data-roll="'+esc(s.roll)+'" value="'+esc(s.roll)+'" aria-label="Roll number"><input data-field="esname" data-roll="'+esc(s.roll)+'" dir="auto" value="'+esc(s.name)+'" placeholder="Name (optional)" aria-label="Name"><button class="btn small danger'+(armed?' armed':'')+'" data-act="esrm" data-roll="'+esc(s.roll)+'">'+(armed?'Remove?':'Remove')+'</button></li>';
   }).join('')+'</ul>':'<p class="muted">No students yet.</p>')+
@@ -965,9 +999,15 @@ function esEdit(roll,field,val){
   return false;
 }
 function esRemove(roll){
-  var E=ui.es;if(!E)return;var regs=regsOf(E.head,E.sec),n=0;
-  regs.forEach(function(c){c.students.filter(function(s){return s.roll===roll;}).forEach(function(s){dbDeleteStudent(s.id);n++;});c.students=c.students.filter(function(s){return s.roll!==roll;});});
-  E.armed='';toast('Roll number '+roll+' removed from '+n+' register'+(n===1?'':'s')+'.');
+  var E=ui.es;if(!E)return;
+  var secName=E.sec?(E.head+' · '+E.sec):E.head;
+  sb.rpc('remove_student',{p_section:secName,p_roll:roll}).then(function(r){
+    if(r.error){toast(r.error.message||'Could not remove student.');}
+    else{
+      E.armed='';toast('Roll number '+roll+' removed from section.');
+      loadAll();
+    }
+  });
 }
 /* Assign a teacher to one subject register, straight from the Classes page.
    A listed teacher without a login gets one here (email + password) before being assigned. */
@@ -978,7 +1018,7 @@ function assignForm(c,cur){
   h+=(none?'':teacherFreeBox('taQ'))+'<div class="row" style="align-items:flex-end"><label class="lbl" style="flex:2;min-width:180px">Teacher for '+esc(c.subject||'this register')+'<select class="field" id="taWho" data-combo="Type a teacher’s name or department"><option value="">'+(none?'No teachers yet':'Choose a teacher…')+'</option>'+teacherOptions(A.tid)+'</select></label>'+
     '<label class="lbl" style="flex:1;min-width:140px">From<input class="field mono" id="taFrom" type="date" value="'+esc(A.from||todayISO())+'"></label></div>'+
     (pick&&!pick.email?'<p class="hint">'+esc(pick.name)+' has no login yet. Enter their college email to create one.</p>'+loginFields('ta',A.lEmail,A.lPass):'')+
-    (cur?'<p class="hint">'+esc(teacherLabel(cur))+' teaches this now. Their assignment ends the day before the new teacher starts. History is kept.</p>':'')+
+    (cur?'<p class="hint">'+esc(teacherLabel(cur))+' teaches this now. Additional teachers can be assigned concurrently.</p>':'')+
     (none?'<p class="hint">Add teachers on the <button class="linkbtn" data-act="nav" data-v="teachers">Teachers</button> page first.</p>':'')+
     (ui.asg.msg?'<p class="hint warn" role="alert">'+esc(ui.asg.msg)+'</p>':'')+
     '<div class="row"><button class="btn primary small" data-act="tado"'+(A.busy?' disabled':'')+'>'+(A.busy?'Assigning…':pick&&!pick.email?'Create login and assign':'Assign')+'</button><button class="btn small" data-act="tacancel">Cancel</button></div>';
@@ -988,7 +1028,6 @@ async function doAssign(){
   var A=ui.ta,c=A&&S.classes[A.cid];if(!c||A.busy)return;
   var tch=A.tid?tById(A.tid):null;
   if(!tch){ui.asg.msg='Choose a teacher.';return render();}
-  var pre=assignClash(c,A.from||todayISO());if(pre.bad){ui.asg.msg=pre.bad;return render();}
   A.busy=true;ui.asg.msg='';render();
   if(!tch.email){
     try{var res=await setTeacherLogin(tch.id,A.lEmail,A.lPass==null?'123456':A.lPass);toast(res==='created'?'Login created for '+tch.name+'.':'Linked '+tch.name+' to their existing login.');}
@@ -1038,10 +1077,10 @@ function viewQuickAssign(){
   h+='</section><section class="card"><h3>5. Check and assign</h3><label class="lbl" style="max-width:220px">From<input class="field mono" id="qaFrom" type="date" value="'+esc(Q.from||t)+'"></label>';
   if(tg.length){
     var em=pick&&pick.email;
-    h+='<ul class="list">'+tg.map(function(c){var ct=currentTeacher(c,t),k=assignClash(c,Q.from||t);
-      var note=em&&ct===em?'<span class="chip P">Already teaching</span>':k.bad?'<span class="chip A">Clash</span>':ct?'<span class="hint">replaces '+esc(teacherLabel(ct))+'</span>':'<span class="hint">no teacher now</span>';
+    h+='<ul class="list">'+tg.map(function(c){var ct=currentTeacher(c,t);
+      var note=em&&ct===em?'<span class="chip P">Already teaching</span>':ct?'<span class="hint">also taught by '+esc(teacherLabel(ct))+'</span>':'<span class="hint">no teacher now</span>';
       return '<li class="srow-edit" style="grid-template-columns:minmax(0,1fr) auto"><span>'+esc(regLabel(c))+'</span>'+note+'</li>';}).join('')+'</ul>'+
-      '<p class="hint">Whoever teaches a register now stops the day before the start date. History is kept.</p>';
+      '<p class="hint">Teachers are assigned to the selected registers from the start date.</p>';
   }else h+='<p class="muted">Choose sections and courses to see the registers.</p>';
   if(Q.msg)h+='<p class="hint warn" role="alert">'+esc(Q.msg)+'</p>';
   h+='<div class="row"><button class="btn primary" data-act="qado"'+(Q.busy||!tg.length||!pick?' disabled':'')+'>'+(Q.busy?'Assigning…':'Assign '+(pick?esc(tName(pick))+' to ':'')+tg.length+' register'+(tg.length===1?'':'s'))+'</button></div></section></div>';
@@ -1056,12 +1095,17 @@ async function doQuickAssign(){
     try{var res=await setTeacherLogin(pick.id,Q.lEmail,Q.lPass==null?'123456':Q.lPass);toast(res==='created'?'Login created for '+pick.name+'.':'Linked '+pick.name+' to their existing login.');}
     catch(e){Q.busy=false;Q.msg=e.message;return render();}
   }
-  var ok=0,same=0,fail=[];
-  for(var i=0;i<tg.length;i++){var err=await assignOne(tg[i],pick.email,from);if(!err)ok++;else if(err==='same')same++;else fail.push(regLabel(tg[i])+': '+err);}
+  var ok=0,fail=[];
+  for(var i=0;i<tg.length;i++){
+    var c=tg[i],subs=c.subject?[c.subject]:null;
+    var r=await sb.rpc('assign_teacher',{p_section:c.name,p_email:pick.email.toLowerCase().trim(),p_from:from,p_subjects:subs});
+    if(!r.error){ok++;await refreshAssign(c);}
+    else fail.push(regLabel(c)+': '+(r.error.message||'failed'));
+  }
   Q.busy=false;
   if(!fail.length){Q.secs={};Q.subs={};}
   Q.msg=fail.length?'Not assigned — '+fail.join(' '):'';
-  toast((ok?'Assigned '+tName(pick)+' to '+ok+' register'+(ok===1?'':'s')+'.':'Nothing new to assign.')+(same?' '+same+' already taught by them.':'')+(fail.length?' '+fail.length+' could not be assigned.':''));
+  toast((ok?'Assigned '+tName(pick)+' to '+ok+' register'+(ok===1?'':'s')+'.':'Nothing new to assign.')+(fail.length?' '+fail.length+' could not be assigned.':''));
   render();
 }
 /* Add a section to an existing class: one register per subject the class already teaches. */
@@ -1083,7 +1127,7 @@ function addSectionForm(N){
     (N.msg?'<p class="hint warn" role="alert">'+esc(N.msg)+'</p>':'')+
     '<div class="row"><button class="btn primary" data-act="nsdo">Create section</button><button class="btn" data-act="nscancel">Cancel</button></div></div>';
 }
-function createSection(){
+async function createSection(){
   var N=ui.ns;if(!N)return;
   var v=N.name.trim().replace(/^section\s+/i,'');
   if(!v){N.msg='Enter the section name.';return render();}
@@ -1092,25 +1136,430 @@ function createSection(){
   var subs=classSubjects(N.head).filter(function(s){return !N.skip[s.toLowerCase()];});
   if(!subs.length){N.msg='Choose at least one subject.';return render();}
   var nm=(N.head+' · '+sec).slice(0,200);
-  subs.forEach(function(s){dbCreateClass(newClass(nm,s,'',[]));});
-  ui.ns=null;ui.open=ui.open||{};ui.open['s|'+N.head+'|'+sec]=true;render();
-  toast(sec+' added to '+N.head+' with '+subs.length+' subject register'+(subs.length===1?'':'s')+'.');
+  try{
+    var r=await sb.rpc('create_section',{p_name:nm,p_subjects:subs});
+    if(r.error)throw r.error;
+    ui.ns=null;ui.open=ui.open||{};ui.open['s|'+N.head+'|'+sec]=true;
+    await loadAll();
+    toast(sec+' added to '+N.head+' with '+subs.length+' subject register'+(subs.length===1?'':'s')+'.');
+  }catch(e){
+    console.error(e);
+    N.msg=e.message||'Could not create section.';
+  }
+  render();
 }
-function deleteGroup(key){
+async function deleteGroup(key){
   if(ui.cdel!==key){ui.cdel=key;ui.ce=null;return render();}
   var p=key.split('|'),regs=p[0]==='h'?regsOf(p[1]):regsOf(p[1],p.slice(2).join('|'));
   ui.cdel='';
   var label=p[0]==='h'?p[1]:p.slice(2).join('|')+' of '+p[1];
+  if(p[0]==='s'){
+    var secName=(p[1]+' · '+p.slice(2).join('|')).slice(0,200);
+    try{
+      var r=await sb.rpc('archive_section',{p_name:secName});
+      if(r.error)throw r.error;
+      await loadAll();
+      toast('Deleted '+label+'. Its students and attendance are kept in archive.');
+    }catch(e){
+      console.error(e);
+      toast('Could not delete section: '+(e.message||''));
+    }
+    render();
+    return;
+  }
   if(removeRegs(regs))toast(regs.some(function(c){return c.students.length;})?'Deleted '+label+'. Its students and attendance are kept. Restore it from Deleted at the bottom of Classes.':'Deleted '+label+' ('+regs.length+' register'+(regs.length===1?'':'s')+').');
   render();
+}
+
+/* ---------- sections management (manager only) ---------- */
+function allSections(){
+  var seen={},out=[];
+  activeClasses().forEach(function(c){
+    var sp=splitName(c.name);
+    if(!sp.sec)return;
+    var k=sp.head+'|'+sp.sec;
+    if(!seen[k]){
+      seen[k]=true;
+      var regs=regsOf(sp.head,sp.sec);
+      var tchs=sectionTeachers(sp.head,sp.sec);
+      var stCount=regs.length&&regs[0].students?regs[0].students.length:0;
+      out.push({
+        key:k,
+        head:sp.head,
+        sec:sp.sec,
+        name:sp.sec.replace(/^Section /,''),
+        regs:regs,
+        studentsCount:stCount,
+        teachers:tchs
+      });
+    }
+  });
+  return out.sort(function(a,b){
+    return (a.head+' '+a.sec).localeCompare(b.head+' '+b.sec,undefined,{numeric:true});
+  });
+}
+function sectionTeachers(head,sec){
+  var regs=regsOf(head,sec),t=todayISO(),seen={},out=[];
+  regs.forEach(function(c){
+    (c.assign||[]).forEach(function(a){
+      if(a.from<=t&&(!a.to||t<=a.to)){
+        if(!seen[a.email]){
+          seen[a.email]=true;
+          out.push(a.email);
+        }
+      }
+    });
+  });
+  return out;
+}
+async function createSectionInProgram(head,name){
+  head=String(head||'').trim();
+  var v=String(name||'').trim().replace(/^section\s+/i,'');
+  if(!head)return 'Choose a class / program first.';
+  if(!v)return 'Enter a section name.';
+  var sec='Section '+v;
+  var subs=classSubjects(head);
+  if(!subs.length){
+    var pName=head.split(' · ').slice(1).join(' · '),yr=head.split(' · ')[0];
+    subs=defaultSubjects(pName,yr);
+  }
+  if(!subs.length)subs=['General'];
+  var nm=(head+' · '+sec).slice(0,200);
+  var r=await sb.rpc('create_section',{p_name:nm,p_subjects:subs});
+  if(r.error)return r.error.message||'Could not create section.';
+  await loadAll();
+  return '';
+}
+async function renameSection(head,oldSec,newName){
+  var v=String(newName||'').trim().replace(/^section\s+/i,'');
+  if(!v)return 'Enter a section name.';
+  var ns='Section '+v;
+  if(ns.toLowerCase()===oldSec.toLowerCase())return '';
+  var oldNm=(head+' · '+oldSec).slice(0,200);
+  var newNm=(head+' · '+ns).slice(0,200);
+  var r=await sb.rpc('rename_section',{p_old:oldNm,p_new:newNm});
+  if(r.error)return r.error.message||'Could not rename section.';
+  await loadAll();
+  return '';
+}
+async function deleteSection(head,sec){
+  var nm=(head+' · '+sec).slice(0,200);
+  var r=await sb.rpc('archive_section',{p_name:nm});
+  if(r.error)throw r.error;
+  await loadAll();
+  return true;
+}
+async function addStudentToSection(head,sec,roll,name){
+  roll=String(roll||'').trim();
+  name=String(name||'').trim();
+  if(!roll)return 'Enter a roll number.';
+  var nm=(head+' · '+sec).slice(0,200);
+  var r=await sb.rpc('add_student',{p_section:nm,p_roll:roll,p_name:name});
+  if(r.error)return r.error.message||'Could not add student.';
+  await loadAll();
+  return '';
+}
+async function bulkAddStudentsToSection(head,sec,text){
+  var regs=regsOf(head,sec);
+  if(!regs.length)return {count:0,skipped:0,error:'No registers in this section.'};
+  var base=regs[0];
+  var typed=parseStudents(text,base.students);
+  if(!typed.length)return {count:0,skipped:0,error:'No students found to add.'};
+  var seen={},list=[],have={};
+  base.students.forEach(function(s){have[s.roll.toLowerCase()]=true;});
+  var skipped=0;
+  typed.forEach(function(s){
+    var rk=s.roll.toLowerCase();
+    if(seen[rk]||have[rk]){skipped++;return;}
+    seen[rk]=true;
+    list.push({roll:s.roll,name:s.name});
+  });
+  if(!list.length)return {count:0,skipped:skipped,error:skipped?'All entered roll numbers already exist in this section.':'No valid students to add.'};
+  var nm=(head+' · '+sec).slice(0,200);
+  var added=0,failed=[];
+  for(var i=0;i<list.length;i++){
+    var r=await sb.rpc('add_student',{p_section:nm,p_roll:list[i].roll,p_name:list[i].name||''});
+    if(r.error)failed.push(list[i].roll+': '+(r.error.message||'failed'));
+    else added++;
+  }
+  if(added>0)await loadAll();
+  return {count:added,skipped:skipped,error:failed.join('; ')};
+}
+function secBulkPreviewText(base,text){
+  if(!text||!text.trim())return 'Paste one student per line (e.g. "101, Ali Ahmed"). Existing roll numbers will be skipped.';
+  var typed=parseStudents(text,base?base.students:[]);
+  if(!typed.length)return 'No valid lines recognized yet.';
+  var seen={},toAdd=0,dup=0,have={};
+  (base?base.students:[]).forEach(function(s){have[s.roll.toLowerCase()]=true;});
+  typed.forEach(function(s){
+    var rk=s.roll.toLowerCase();
+    if(seen[rk]||have[rk])dup++;
+    else{seen[rk]=true;toAdd++;}
+  });
+  return toAdd+' student'+(toAdd===1?'':'s')+' will be added.'+(dup?' ('+dup+' duplicate/already present skipped)':'');
+}
+function editStudentInSection(head,sec,oldRoll,newRoll,newName){
+  var regs=regsOf(head,sec);
+  oldRoll=String(oldRoll).trim();
+  newRoll=String(newRoll).trim();
+  newName=String(newName||'').trim();
+  if(!newRoll)return 'Roll number cannot be empty.';
+  if(newRoll.toLowerCase()!==oldRoll.toLowerCase()){
+    var clash=regs.some(function(c){
+      return c.students.some(function(s){return s.roll.toLowerCase()===newRoll.toLowerCase();});
+    });
+    if(clash)return 'Roll number '+newRoll+' is already used in this section.';
+  }
+  regs.forEach(function(c){
+    c.students.forEach(function(s){
+      if(s.roll.toLowerCase()===oldRoll.toLowerCase()){
+        s.roll=newRoll;
+        s.name=newName;
+        dbUpdateStudent(s);
+      }
+    });
+  });
+  return '';
+}
+// Note: Student removal preserves student idx positions for existing attendance marks, but removal drops the student from reports once attendance exists.
+async function removeStudentFromSection(head,sec,roll){
+  var nm=(head+' · '+sec).slice(0,200);
+  var r=await sb.rpc('remove_student',{p_section:nm,p_roll:String(roll).trim()});
+  if(r.error)throw r.error;
+  await loadAll();
+}
+async function assignTeachersToSection(head,sec,emails,from,subjects){
+  var nm=(head+' · '+sec).slice(0,200);
+  var t=from||todayISO();
+  var subs=(subjects&&subjects.length)?subjects:null;
+  for(var i=0;i<emails.length;i++){
+    var em=emails[i].toLowerCase().trim();
+    var r=await sb.rpc('assign_teacher',{p_section:nm,p_email:em,p_from:t,p_subjects:subs});
+    if(r.error)throw r.error;
+  }
+  await loadAll();
+}
+async function removeTeacherFromSection(head,sec,email,subjects){
+  var nm=(head+' · '+sec).slice(0,200);
+  var subs=(subjects&&subjects.length)?subjects:null;
+  var r=await sb.rpc('unassign_teacher',{p_section:nm,p_email:email.toLowerCase().trim(),p_subjects:subs});
+  if(r.error)throw r.error;
+  await loadAll();
+}
+function viewSections(){
+  var mgr=isMgr(),h=topbar('Sections',mgr?'Create, manage rosters and assign teachers':'Sections list',false),wait=loadingBody();
+  if(wait)return h+wait;
+  if(!mgr)return h+'<section class="empty"><p class="muted">Only managers can manage sections.</p></section>';
+  var S_sec=ui.secM,all=allSections();
+  var headsSeen={},progOptions=[];
+  activeClasses().forEach(function(c){var sp=splitName(c.name);if(sp.head&&!headsSeen[sp.head]){headsSeen[sp.head]=true;progOptions.push(sp.head);}});
+  progOptions.sort();
+
+  var fYear=S_sec.filterYear||'First Year',fProg=S_sec.filterProg||'all';
+  var list=all.filter(function(s){
+    if(fYear!=='All'&&s.head.indexOf(fYear)!==0)return false;
+    if(fProg!=='all'&&s.head!==fProg)return false;
+    return true;
+  });
+
+  h+='<div class="stack">';
+  h+='<div class="seg" role="group" aria-label="Year">'+['First Year','Second Year','All'].map(function(y){
+    return '<button data-act="secfilteryear" data-v="'+y+'" aria-pressed="'+(fYear===y)+'">'+y+'</button>';
+  }).join('')+'</div>';
+
+  h+='<div class="row" style="justify-content:space-between;align-items:flex-end">'+
+    '<label class="lbl" style="flex:1;min-width:200px">Class / Program'+
+    '<select class="field" id="secProgFilter"><option value="all"'+(fProg==='all'?' selected':'')+'>All programs ('+progOptions.length+')</option>'+
+    progOptions.filter(function(hd){return fYear==='All'||hd.indexOf(fYear)===0;}).map(function(hd){
+      return '<option value="'+esc(hd)+'"'+(fProg===hd?' selected':'')+'>'+esc(hd)+'</option>';
+    }).join('')+'</select></label>'+
+    '<button class="btn primary icobtn" data-act="seccreateopen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>Create section</button>'+
+    '</div>';
+
+  if(S_sec.createOpen){
+    var availHeads=progOptions.filter(function(hd){return fYear==='All'||hd.indexOf(fYear)===0;});
+    if(!availHeads.length)availHeads=progOptions;
+    if(!S_sec.createHead&&availHeads.length)S_sec.createHead=availHeads[0];
+    h+='<section class="card"><h3>Create new section</h3>'+
+      '<label class="lbl">Class / Program<select class="field" id="secCreateHead">'+
+      availHeads.map(function(hd){return '<option value="'+esc(hd)+'"'+(S_sec.createHead===hd?' selected':'')+'>'+esc(hd)+'</option>';}).join('')+
+      '</select></label>'+
+      '<label class="lbl">Section name<input class="field" id="secCreateName" value="'+esc(S_sec.createName)+'" placeholder="e.g. M1, IP2, A, B" autocomplete="off"></label>'+
+      '<p class="hint">Creates a new section with all subject registers of that program. You can add students and assign multiple teachers right away.</p>'+
+      (S_sec.createMsg?'<p class="hint warn" role="alert">'+esc(S_sec.createMsg)+'</p>':'')+
+      '<div class="row"><button class="btn primary" data-act="seccreate">Create section</button><button class="btn" data-act="seccreatecancel">Cancel</button></div>'+
+      '</section>';
+  }
+
+  if(!list.length){
+    h+='<section class="empty"><h2>No sections found</h2><p class="muted">'+(all.length?'No sections match the current filter. Try changing the Year or Program above.':'No sections created yet. Click "Create section" above.')+'</p></section>';
+  }else{
+    h+='<ul class="classes">'+list.map(function(s){
+      var tchs=s.teachers;
+      return '<li><button class="sec-card" data-act="secopen" data-k="'+esc(s.key)+'">'+
+        '<div class="sec-header"><h2 style="margin:0">'+esc(s.sec)+'</h2><span class="chip '+(s.studentsCount?'P':'')+'">'+s.studentsCount+' student'+(s.studentsCount===1?'':'s')+'</span></div>'+
+        '<div class="cc-sub">'+esc(s.head)+' · '+s.regs.length+' subject register'+(s.regs.length===1?'':'s')+'</div>'+
+        '<div class="tchip-list" style="margin-top:4px">'+
+        (tchs.length?tchs.map(function(em){return '<span class="chip blue">🧑‍🏫 '+esc(teacherLabel(em))+'</span>';}).join(''):'<span class="chip L">No teachers assigned</span>')+
+        '</div>'+
+        '</button></li>';
+    }).join('')+'</ul>';
+  }
+
+  return h+'</div>';
+}
+function viewSectionDetail(){
+  var mgr=isMgr();
+  if(!mgr){ui.view='home';return viewHome();}
+  var S_sec=ui.secM,k=S_sec.openSec;
+  if(!k||k.indexOf('|')<0){ui.view='sections';return viewSections();}
+  var parts=k.split('|'),head=parts[0],sec=parts[1];
+  var regs=regsOf(head,sec);
+  if(!regs.length){
+    return topbar('Section not found','','sections')+'<div class="stack"><section class="empty"><p class="warn">This section has been deleted or archived.</p><div class="row"><button class="btn primary" data-act="nav" data-v="sections">Back to Sections</button></div></section></div>';
+  }
+  var base=regs[0],students=base.students||[],tchs=sectionTeachers(head,sec);
+  var h=topbar(sec,head,'sections');
+  h+='<div class="stack">';
+
+  h+='<section class="card">'+
+    '<div class="sec-header"><div><h3>'+esc(sec)+' Overview</h3><p class="hint">'+esc(head)+' · '+regs.length+' registers ('+esc(regs.map(function(r){return r.subject||'General';}).join(', '))+')</p></div>'+
+    '<div class="row" style="gap:6px">'+
+    '<button class="btn small" data-act="secrenameopen">Rename section</button>'+
+    '<button class="btn small danger" data-act="secdelopen">Delete section</button>'+
+    '</div></div>';
+
+  if(S_sec.renameOpen){
+    h+='<div class="card" style="margin-top:10px;background:var(--surface2)">'+
+      '<h3>Rename '+esc(sec)+'</h3>'+
+      '<label class="lbl">New section name<input class="field" id="secRenameVal" value="'+esc(S_sec.renameVal||sec.replace(/^Section /,''))+'" placeholder="e.g. M2" autocomplete="off"></label>'+
+      (S_sec.renameMsg?'<p class="hint warn" role="alert">'+esc(S_sec.renameMsg)+'</p>':'')+
+      '<div class="row"><button class="btn primary small" data-act="secrenamesave">Save</button><button class="btn small" data-act="secrenamecancel">Cancel</button></div>'+
+      '</div>';
+  }
+
+  if(S_sec.delConfirm){
+    h+='<div class="card warn" style="margin-top:10px;border-color:var(--af)">'+
+      '<h3>Delete '+esc(sec)+'?</h3>'+
+      '<p class="hint">Deleting this section archives its '+regs.length+' subject registers. All student rosters and attendance history are kept safe and can be restored if needed.</p>'+
+      '<div class="row"><button class="btn danger small armed" data-act="secdeldo">Yes, delete section</button><button class="btn small" data-act="secdelcancel">Cancel</button></div>'+
+      '</div>';
+  }
+  h+='</section>';
+
+  h+='<section class="card">'+
+    '<div class="sec-header"><div><h3>Assigned Teachers</h3><p class="hint">Multiple teachers can be assigned to this section. All assigned teachers can take attendance.</p></div>'+
+    (!S_sec.tPickOpen?'<button class="btn small primary icobtn" data-act="sectpickopen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>Assign teachers</button>':'')+
+    '</div>';
+
+  if(S_sec.tPickOpen){
+    var availTchs=(ui.tp.list||[]).filter(function(x){return x.email&&tchs.indexOf(x.email)<0;});
+    h+='<div class="card" style="margin-top:10px;background:var(--surface2)">'+
+      '<h3>Assign teachers to '+esc(sec)+'</h3>'+
+      '<p class="hint">Select one or more teachers to assign to all '+regs.length+' subject registers of this section.</p>';
+    if(!availTchs.length){
+      h+='<p class="muted">All listed teachers are already assigned to this section, or no teachers with email logins exist.</p>';
+    }else{
+      h+='<div class="checks" style="max-height:220px;overflow-y:auto;padding:4px 0">'+
+        availTchs.map(function(tc){
+          var isSel=!!S_sec.selectedTids[tc.email];
+          return '<label class="chk" style="width:100%"><input type="checkbox" data-act="sectchchk" data-em="'+esc(tc.email)+'"'+(isSel?' checked':'')+'><span><b>'+esc(tc.name||tc.email)+'</b> · <span class="hint">'+esc(tc.department||'General')+' ('+esc(tc.email)+')</span></span></label>';
+        }).join('')+'</div>';
+    }
+    var subOptions=regs.map(function(c){return c.subject;}).filter(Boolean);
+    h+='<div class="row" style="align-items:flex-end;margin-top:8px">'+
+      '<label class="lbl" style="flex:1;min-width:180px">Subject<select class="field" id="secTSubs"><option value="">All subjects (default)</option>'+
+      subOptions.map(function(sub){
+        return '<option value="'+esc(sub)+'"'+(S_sec.subSel===sub?' selected':'')+'>'+esc(sub)+'</option>';
+      }).join('')+'</select></label>'+
+      '<label class="lbl" style="flex:1;min-width:140px">Teaches from<input class="field mono" id="secTFrom" type="date" value="'+esc(S_sec.tFrom||todayISO())+'"></label>'+
+      '</div>';
+    if(S_sec.tMsg)h+='<p class="hint warn" role="alert">'+esc(S_sec.tMsg)+'</p>';
+    h+='<div class="row" style="margin-top:8px">'+
+      '<button class="btn primary small" data-act="secassignsave"'+(!availTchs.length?' disabled':'')+'>Assign selected</button>'+
+      '<button class="btn small" data-act="sectpickcancel">Cancel</button>'+
+      '</div></div>';
+  }
+
+  if(!tchs.length){
+    h+='<p class="muted">No teachers are currently assigned to this section.</p>';
+  }else{
+    h+='<ul class="list">'+tchs.map(function(em){
+      var tName=teacherLabel(em);
+      var tObj=(ui.tp.list||[]).filter(function(x){return x.email===em;})[0];
+      var dept=tObj&&tObj.department?tObj.department:'Teacher';
+      return '<li class="srow-edit" style="grid-template-columns:minmax(0,1fr) auto"><div><b>🧑‍🏫 '+esc(tName)+'</b><br><span class="hint">'+esc(dept)+' · '+esc(em)+'</span></div>'+
+        '<button class="btn small danger" data-act="secunassign" data-em="'+esc(em)+'">Remove</button></li>';
+    }).join('')+'</ul>';
+  }
+  h+='</section>';
+
+  h+='<section class="card">'+
+    '<div class="sec-header"><div><h3>Students ('+students.length+')</h3><p class="hint">Students enrolled in '+esc(sec)+'. Changes automatically apply across all subject registers.</p></div>'+
+    '<div class="row" style="gap:6px">'+
+    (!S_sec.stAddOpen?'<button class="btn small primary icobtn" data-act="secstaddopen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>Add student</button>':'')+
+    (!S_sec.bulkOpen?'<button class="btn small" data-act="secbulkopen">Bulk add / Paste</button>':'')+
+    '</div></div>';
+
+  if(S_sec.stAddOpen){
+    h+='<div class="card" style="margin-top:10px;background:var(--surface2)">'+
+      '<h3>Add student to '+esc(sec)+'</h3>'+
+      '<div class="row" style="align-items:flex-end">'+
+      '<label class="lbl" style="flex:1;min-width:120px">Roll number<input class="field mono" id="secStRoll" value="'+esc(S_sec.stRoll)+'" placeholder="e.g. 101" autocomplete="off"></label>'+
+      '<label class="lbl" style="flex:2;min-width:180px">Student name<input class="field" id="secStName" value="'+esc(S_sec.stName)+'" placeholder="e.g. Muhammad Ali" autocomplete="off"></label>'+
+      '</div>'+
+      (S_sec.stMsg?'<p class="hint warn" role="alert">'+esc(S_sec.stMsg)+'</p>':'')+
+      '<div class="row" style="margin-top:8px"><button class="btn primary small" data-act="secstaddsave">Add student</button><button class="btn small" data-act="secstaddcancel">Cancel</button></div>'+
+      '</div>';
+  }
+
+  if(S_sec.bulkOpen){
+    h+='<div class="card" style="margin-top:10px;background:var(--surface2)">'+
+      '<h3>Bulk add students</h3>'+
+      '<p class="hint">Paste students one per line (e.g. "101, Muhammad Ali" or copy-pasted two columns from Excel/Google Sheets). Existing roll numbers are skipped.</p>'+
+      '<textarea class="field mono" id="secBulkIn" rows="6" placeholder="101, Muhammad Ali&#10;102, Usman Tariq">'+esc(S_sec.bulkText)+'</textarea>'+
+      '<p class="hint" id="secBulkPreview">'+esc(secBulkPreviewText(base,S_sec.bulkText))+'</p>'+
+      (S_sec.stMsg?'<p class="hint warn" role="alert">'+esc(S_sec.stMsg)+'</p>':'')+
+      '<div class="row" style="margin-top:8px"><button class="btn primary small" data-act="secbulksave">Save students</button><button class="btn small" data-act="secbulkcancel">Cancel</button></div>'+
+      '</div>';
+  }
+
+  if(!students.length){
+    h+='<p class="muted">No students in this section yet. Use "+ Add student" or "Bulk add / Paste" above.</p>';
+  }else{
+    h+='<ul class="list">'+students.map(function(st){
+      var isEd=S_sec.editRoll===st.roll,armed=S_sec.armedRoll===st.roll;
+      if(isEd){
+        return '<li class="srow-edit" style="grid-template-columns:84px minmax(0,1fr) auto;gap:6px">'+
+          '<input class="r field mono" id="secEditRollVal" value="'+esc(S_sec.editRollVal)+'" placeholder="Roll">'+
+          '<input class="field" id="secEditNameVal" value="'+esc(S_sec.editNameVal)+'" placeholder="Name" dir="auto">'+
+          '<span class="row" style="gap:4px"><button class="btn small primary" data-act="secsteditsave">Save</button><button class="btn small" data-act="secsteditcancel">Cancel</button></span>'+
+          '</li>';
+      }
+      if(armed){
+        return '<li class="srow-edit" style="grid-template-columns:1fr auto;gap:8px;background:var(--warn-bg,#fff3cd);padding:8px 12px;border-radius:6px;border:1px solid #ffeeba">'+
+          '<div><b>Remove roll '+esc(st.roll)+' ('+esc(st.name||'unnamed')+')?</b><br><span class="hint" style="color:#856404">This student will be removed from every subject register of this section.</span></div>'+
+          '<span class="row" style="gap:4px;align-self:center"><button class="btn small danger armed" data-act="secstrm" data-r="'+esc(st.roll)+'">Confirm remove</button>'+
+          '<button class="btn small" data-act="secstrmcancel">Cancel</button></span>'+
+          '</li>';
+      }
+      return '<li class="srow-edit"><span class="roll">'+esc(st.roll)+'</span><span class="sname" dir="auto">'+esc(st.name||'—')+'</span>'+
+        '<span class="row" style="gap:4px"><button class="btn small" data-act="secstedit" data-r="'+esc(st.roll)+'">Edit</button>'+
+        '<button class="btn small danger" data-act="secstrm" data-r="'+esc(st.roll)+'">Remove</button></span>'+
+        '</li>';
+    }).join('')+'</ul>';
+  }
+  h+='</section>';
+
+  return h+'</div>';
 }
 
 /* ---------- teachers ---------- */
 async function loadTeachers(){
   ui.tp.err='';
-  try{var r=await sb.from('teachers').select('*').order('department').order('sort_no',{nullsFirst:false}).order('name');
+  try{var r=await sb.from('teachers').select('*').is('removed_at',null).order('department').order('sort_no',{nullsFirst:false}).order('name');
     if(r.error){ui.tp.list=[];ui.tp.err=/teachers|schema cache|PGRST205|42P01/.test((r.error.code||'')+' '+(r.error.message||''))?'setup':'load';}
-    else{ui.tp.list=(r.data||[]).filter(function(x){return !x.removed_at;});ui.tp.gone=(r.data||[]).filter(function(x){return x.removed_at;}).sort(function(a,b){return a.removed_at<b.removed_at?1:-1;});}
+    else{ui.tp.list=(r.data||[]).filter(function(x){return !x.removed_at;});ui.tp.gone=[];ui.tp.removed=[];}
   }catch(e){ui.tp.list=[];ui.tp.err='load';}
   render();
 }
@@ -1218,26 +1667,21 @@ function viewTeacherPage(){
     '<div class="row" style="margin-bottom:10px"><input class="field" id="tpQ" type="search" style="flex:2;min-width:200px" value="'+esc(P.q||'')+'" placeholder="Search name, department or email" autocomplete="off">'+
     '<div class="seg nowrap" role="group" aria-label="Show" style="flex:1 1 320px">'+[['all','All'],['on','Assigned'],['off','Not assigned']].map(function(o){return '<button data-act="tpshow" data-v="'+o[0]+'" aria-pressed="'+(show===o[0])+'">'+o[1]+'</button>';}).join('')+'</div></div>';
   var rows=all.filter(function(r){return tMatch(r,q)&&(show==='all'||(show==='on')===(r.regs.length>0));});
-  var gone={};if(edit&&show==='all')(P.gone||[]).concat(P.removed||[]).forEach(function(x){if(tKeys(x,q))(gone[x.department||'Other']||(gone[x.department||'Other']=[])).push(x);});
-  if(!rows.length&&!Object.keys(gone).length){h+='<p class="muted">'+(all.length?'No teachers match.':'No teachers yet.')+'</p>';return h+'</section></div>';}
+  if(!rows.length){h+='<p class="muted">'+(all.length?'No teachers match.':'No teachers yet.')+'</p>';return h+'</section></div>';}
   var groups={};rows.forEach(function(r){(groups[r.dept||'Other']||(groups[r.dept||'Other']=[])).push(r);});
-  Object.keys(gone).forEach(function(d){groups[d]=groups[d]||[];});
   var dOpen=P.dopen||{},forceAll=!!q||show!=='all';
   h+=Object.keys(groups).sort().map(function(d){
     var rs=groups[d],on=rs.filter(function(r){return r.regs.length;}).length,open=forceAll||dOpen[d]||rs.some(function(r){return r.key===P.open;});
     var s='<div class="card dgroup'+(open?'':' closed')+'"><button class="tog" data-act="tpdept" data-d="'+esc(d)+'" aria-expanded="'+open+'"><span class="chev" aria-hidden="true"></span><span><h3>'+esc(d)+'</h3><span class="hint">'+rs.length+' teacher'+(rs.length===1?'':'s')+' · '+teachChip(on,rs.length).replace('with a teacher','assigned')+'</span></span></button>';
     if(!open)return s+'</div>';
-    var gd=gone[d]||[];
-    return s+(rs.length?'<ul class="list tlist">'+rs.map(function(r){return teacherRow(r,edit,regs);}).join('')+'</ul>':'')+
-      (gd.length?'<div class="removed"><h4>Removed <span class="hint">('+gd.length+')</span></h4><ul class="list">'+gd.map(function(x){
-        return '<li class="srow-edit" style="grid-template-columns:minmax(0,1fr) auto"><span>'+esc(x.name||x.email)+'<br><span class="hint">'+(x.designation?esc(x.designation)+' · ':'')+(x.email?esc(x.email):'No login')+(x.removed_at?' · removed '+esc(dmy(String(x.removed_at).slice(0,10))):'')+'</span></span><button class="btn small" data-act="tprestore" data-k="'+esc(x.id)+'">Restore</button></li>';}).join('')+'</ul></div>':'')+'</div>';
+    return s+(rs.length?'<ul class="list tlist">'+rs.map(function(r){return teacherRow(r,edit,regs);}).join('')+'</ul>':'')+'</div>';
   }).join('');
   return h+'</section></div>';
 }
 function teacherRow(r,edit,regs){
   var P=ui.tp,open=P.open===r.key,on=r.regs.length>0;
   var s='<li class="'+(on?'t-on':'t-off')+'"><div class="trow"><span class="avatar" aria-hidden="true">'+esc(initialOf(tName(r)))+'</span><span style="flex:1;min-width:0"><b>'+esc(tName(r))+'</b>'+(r.qual?' <span class="hint">('+esc(r.qual)+')</span>':'')+(r.unlisted?' <span class="chip">Not in list</span>':'')+
-    '<br><span class="hint" style="overflow-wrap:anywhere">'+(r.des?esc(r.des)+' · ':'')+(r.email?esc(r.email):'<span class="nologin">No login yet</span>')+'</span></span>'+
+    '<br><span class="hint" style="overflow-wrap:anywhere">'+(r.dept?esc(r.dept)+' · ':'')+(r.des?esc(r.des)+' · ':'')+(r.email?esc(r.email):'<span class="nologin">No login yet</span>')+'</span></span>'+
     (on?'<span class="chip P">Assigned · '+r.regs.length+' register'+(r.regs.length===1?'':'s')+'</span>':'<span class="chip L">Not assigned</span>')+
     '<button class="btn small" data-act="tpopen" data-k="'+esc(r.key)+'" aria-expanded="'+open+'">'+(open?'Close':edit?'Manage':'View')+'</button></div>';
   if(!open)return s+'</li>';
@@ -1256,14 +1700,24 @@ function teacherRow(r,edit,regs){
       '<div class="row"><button class="btn primary small" data-act="tplogin" data-id="'+esc(r.id)+'"'+(P.busy?' disabled':'')+'>'+(P.busy?'Creating…':'Create login')+'</button></div></div>';
   }
   if(edit&&r.email){
-    var shown=regPicks(regs,P.rfree),nm=shown.length;
-    s+='<label class="chk"><input type="checkbox" id="tpRegFree"'+(P.rfree?' checked':'')+'><span>Only registers with no teacher</span></label>'+
-      (P.rfree?'<p class="hint'+(nm?'':' warn')+'">'+(nm?nm+' register'+(nm===1?'':'s')+' with no teacher'+(nm===1?' (selected)':'')+'.':'Every register has a teacher.')+'</p>':'');
-    s+='<div class="row" style="align-items:flex-end"><label class="lbl" style="flex:2;min-width:200px">Assign a register<select class="field" id="tpReg" data-combo="Type class, section or subject, e.g. 1st ics physics"><option value="">Choose…</option>'+regs.filter(function(c){return c.id===P.cid||shown.indexOf(c)>=0;}).map(function(c){var ct=currentTeacher(c,todayISO());return '<option value="'+esc(c.id)+'" data-k="'+regAlias(c)+'"'+(P.cid===c.id?' selected':'')+'>'+esc(c.name+' — '+(c.subject||'Register'))+(ct?' (now: '+esc(teacherLabel(ct))+')':'')+'</option>';}).join('')+'</select></label>'+
+    var allSecs=allSections();
+    var curSecK=P.secK||(allSecs.length?allSecs[0].key:'');
+    var curSecObj=allSecs.filter(function(s){return s.key===curSecK;})[0]||null;
+    var curSubs=curSecObj?curSecObj.regs.map(function(reg){return reg.subject;}).filter(Boolean):[];
+    s+='<div class="assignbox"><h3>Assign to section</h3>';
+    s+='<div class="row" style="align-items:flex-end">'+
+      '<label class="lbl" style="flex:2;min-width:200px">Section<select class="field" id="tpSecSel">'+
+      allSecs.map(function(sec){
+        return '<option value="'+esc(sec.key)+'"'+(curSecK===sec.key?' selected':'')+'>'+esc(sec.head+' · '+sec.sec)+'</option>';
+      }).join('')+'</select></label>'+
+      '<label class="lbl" style="flex:1;min-width:160px">Subject<select class="field" id="tpSubSel"><option value="">All subjects (default)</option>'+
+      curSubs.map(function(sub){
+        return '<option value="'+esc(sub)+'"'+(P.subSel===sub?' selected':'')+'>'+esc(sub)+'</option>';
+      }).join('')+'</select></label>'+
       '<label class="lbl" style="flex:1;min-width:140px">From<input class="field mono" id="tpFrom" type="date" value="'+esc(P.from||todayISO())+'"></label>'+
-      '<button class="btn primary" data-act="tpassign">Assign</button></div>'+
+      '<button class="btn primary" data-act="tpassign" data-em="'+esc(r.email)+'">Assign</button></div>'+
       (ui.asg.msg?'<p class="hint warn" role="alert">'+esc(ui.asg.msg)+'</p>':'')+
-      '<p class="hint">If someone else teaches that register now, their assignment ends the day before. History is kept.</p>';
+      '<p class="hint">Assigns '+esc(tName(r))+' to the selected section or subject. Skips registers where already assigned.</p></div>';
   }
   if(edit&&r.id)s+='<div class="row"><button class="btn small danger'+(P.armed===r.key?' armed':'')+'" data-act="tpremove" data-k="'+esc(r.key)+'">'+(P.armed===r.key?'Tap again to remove':'Remove from list')+'</button></div>';
   return s+'</div></li>';
@@ -1371,15 +1825,20 @@ function defaultSubjects(prog,year){
 function viewClass(){
   var c=cls();if(!c){ui.view='home';return viewHome();}
   var h=topbar(c.name,c.subject||(c.students.length+' students'),true);
-  h+='<nav class="seg" aria-label="Class sections" style="margin-bottom:16px">'+(isMgr()?['report','students','teachers']:['report']).map(function(t){return '<button data-act="tab" data-tab="'+t+'" aria-pressed="'+(ui.tab===t)+'">'+{report:'Attendance',students:'Students',teachers:'Teachers'}[t]+'</button>';}).join('')+'</nav>';
-  if(ui.tab==='mark'||(!isMgr()&&(ui.tab==='students'||ui.tab==='teachers')))ui.tab='report';
-  return h+(ui.tab==='report'?regMonthsView(c):ui.tab==='teachers'?viewTeachers(c):viewStudents(c));
+  var tabs=isMgr()?['mark','report','students','teachers']:['mark','report'];
+  h+='<nav class="seg" aria-label="Class sections" style="margin-bottom:16px">'+tabs.map(function(t){return '<button data-act="tab" data-tab="'+t+'" aria-pressed="'+(ui.tab===t)+'">'+{mark:'Daily',report:'Monthly',students:'Students',teachers:'Teachers'}[t]+'</button>';}).join('')+'</nav>';
+  if(!isMgr()&&(ui.tab==='students'||ui.tab==='teachers'))ui.tab='mark';
+  if(ui.tab==='mark')return h+viewMark(c);
+  if(ui.tab==='report')return h+regMonthsView(c);
+  if(ui.tab==='teachers')return h+viewTeachers(c);
+  return h+viewStudents(c);
 }
 function viewMark(c){
   var m=dayOf(c.id,ui.date),k=dayCounts(c,ui.date),isToday=ui.date===todayISO(),ro=!canEdit(c,ui.date),mode=ro?'view':ui.mode;
   var h='<div class="stack">';
   h+='<div class="datebar"><button class="icon-btn" data-act="prevday" aria-label="Previous day">‹</button><input type="date" id="dateIn" value="'+esc(ui.date)+'" max="'+todayISO()+'"'+(!isMgr()&&teacherMinDate()?' min="'+teacherMinDate()+'"':'')+' aria-label="Date"><button class="icon-btn" data-act="nextday" aria-label="Next day"'+(isToday?' disabled':'')+'>›</button>'+(isToday?'':'<button class="btn small" data-act="today">Today</button>')+'</div>';
   h+='<p class="sub" style="margin-top:-8px">'+esc(fmtLong(ui.date))+'</p>';
+  var by=dayBy(c.id,ui.date);if(by)h+='<p class="hint" style="margin-top:-4px">Last updated by '+esc(teacherLabel(by))+'</p>';
   if(!c.students.length){return h+'<section class="empty"><h2>No students yet</h2><p class="muted">Students for this section are added by the registrar from Classes. Once they are added, they appear here for marking.</p></section></div>';}
   h+='<div class="tally" style="grid-template-columns:repeat(3,1fr)"><div class="P"><b>'+k.P+'</b><small>Present</small></div><div class="A"><b>'+k.A+'</b><small>Absent</small></div><div><b>'+k.U+'</b><small>Unmarked</small></div></div>';
   if(ro)h+='<p class="hint warn" role="status">'+esc(isFuture(ui.date)?'Future dates cannot be marked.':lockReason(c,ui.date))+'</p>';
@@ -1495,7 +1954,7 @@ function viewStudents(c){
   h+=importCard(c);
   h+='<section><h3 style="margin-bottom:8px">'+c.students.length+' student'+(c.students.length===1?'':'s')+'</h3>'+(c.students.length?'<ul class="list">'+c.students.map(function(s){
     var armed=ui.confirm==='s'+s.id;
-    return '<li class="srow-edit"><input class="r" data-field="roll" data-sid="'+esc(s.id)+'" value="'+esc(s.roll)+'" aria-label="Roll number"><input data-field="sname" data-sid="'+esc(s.id)+'" dir="auto" value="'+esc(s.name)+'" placeholder="Name (optional)" aria-label="Name"><button class="btn small danger'+(armed?' armed':'')+'" data-act="rmstudent" data-sid="'+esc(s.id)+'">'+(armed?'Remove?':'Remove')+'</button></li>';
+    return '<li class="srow-edit"><input class="r" data-field="roll" data-sid="'+esc(s.id)+'" value="'+esc(s.roll)+'" aria-label="Roll number"><input data-field="sname" data-sid="'+esc(s.id)+'" dir="auto" value="'+esc(s.name)+'" placeholder="Name (optional)" aria-label="Name"><button class="btn small danger'+(armed?' armed':'')+'" data-act="rmstudent" data-sid="'+esc(s.id)+'">'+(armed?'Remove from all registers?':'Remove')+'</button></li>';
   }).join('')+'</ul>':'<p class="muted">No students yet.</p>')+'</section>';
   h+='<section class="card"><h3>Class settings</h3>'+
   '<label class="lbl">Class name<input class="field" data-field="cname" value="'+esc(c.name)+'"></label>'+
@@ -1512,7 +1971,7 @@ function viewTeachers(c){
   var h='<div class="stack"><section class="card"><h3>Assign a teacher</h3>'+
   ((ui.tp.list||[]).length?teacherFreeBox('asgQ',true)+'<label class="lbl">Teacher<select class="field" id="asgEmail" data-combo="Type a teacher’s name or department"><option value="">Choose a teacher…</option>'+teacherOptions(A.email,true)+'</select></label><p class="hint">Only teachers with a login are listed. Give a teacher a login from Classes → Assign teacher, or from the Teachers page.</p>':'<label class="lbl">Teacher email<input class="field" id="asgEmail" type="email" inputmode="email" autocapitalize="off" placeholder="name@'+esc(DOMAIN)+'" value="'+esc(A.email)+'"></label>')+
   '<label class="lbl">Teaches from<input class="field mono" id="asgFrom" type="date" value="'+esc(A.from||t)+'"></label>'+
-  '<p class="hint">The teacher who is teaching this class now is ended automatically the day before this date. History is kept.</p>'+
+  '<p class="hint">Assigning adds the teacher to this register. Multi-teacher assignments are supported.</p>'+
   (A.msg?'<p class="hint warn" role="alert">'+esc(A.msg)+'</p>':'')+
   '<div class="row"><button class="btn primary" data-act="asgadd">Assign teacher</button></div></section>'+
   '<section><h3 style="margin-bottom:8px">Teaching history</h3>'+(list.length?'<ul class="list">'+list.map(function(a){
@@ -1526,38 +1985,28 @@ async function refreshAssign(c){
   if(r.error)throw r.error;
   c.assign=(r.data||[]).map(function(a){return {id:a.id,email:a.teacher_email,from:a.from_day,to:a.to_day||null};});
 }
-function assignClash(c,from){
-  var prev=null,bad='';
-  (c.assign||[]).forEach(function(a){
-    if(a.to&&a.to<from)return;
-    if(!a.to&&a.from<from)prev=a;
-    else bad=teacherLabel(a.email)+' already teaches this from '+fmtShortY(a.from)+(a.to?' to '+fmtShortY(a.to):'')+'. Choose a later start date, or end that assignment first in the register’s Teachers tab.';
-  });
-  return {prev:prev,bad:bad};
-}
-/* Assign em to register c from a date, ending whoever teaches it now. Returns '' on success, 'same' if em already teaches it, else an error message. */
-async function assignOne(c,em,from){
-  var k=assignClash(c,from),prev=k.prev;
-  if(k.bad)return k.bad;
-  if(prev&&prev.email===em)return 'same';
-  try{
-    if(prev)chk(await sb.from('class_teachers').update({to_day:addDays(from,-1)}).eq('id',prev.id));
-    chk(await sb.from('class_teachers').insert({class_id:c.id,teacher_email:em,from_day:from,created_by:ui.email}));
-    await refreshAssign(c);return '';
-  }catch(e){console.error(e);return 'Could not save the assignment. Check the email and dates.';}
-}
 async function addAssignment(c){
   var A=ui.asg,em=String(A.email||'').trim().toLowerCase(),from=A.from||todayISO();
   var sfx='@'+DOMAIN;
   if(em.slice(-sfx.length)!==sfx||em.length<sfx.length+2){A.msg='Enter a full @'+DOMAIN+' email address.';return render();}
-  var err=await assignOne(c,em,from);
-  if(!err){A.email='';A.msg='';toast('Assigned '+teacherLabel(em)+' from '+fmtShort(from)+'.');}
-  else A.msg=err==='same'?teacherLabel(em)+' is already teaching this class.':err;
+  var subs=c.subject?[c.subject]:null;
+  try{
+    var r=await sb.rpc('assign_teacher',{p_section:c.name,p_email:em,p_from:from,p_subjects:subs});
+    if(r.error){A.msg=r.error.message||'Could not save assignment.';}
+    else{A.email='';A.msg='';toast('Assigned '+teacherLabel(em)+' from '+fmtShort(from)+'.');await refreshAssign(c);}
+  }catch(e){console.error(e);A.msg=(e&&e.message)||'Could not save assignment.';}
   render();
 }
 async function endAssignment(c,aid){
-  try{chk(await sb.from('class_teachers').update({to_day:todayISO()}).eq('id',aid));await refreshAssign(c);toast('Assignment ended today.');}
-  catch(e){console.error(e);toast('Could not end the assignment.');}
+  try{
+    var a=(c.assign||[]).filter(function(x){return x.id===aid;})[0];
+    if(a){
+      var subs=c.subject?[c.subject]:null;
+      var r=await sb.rpc('unassign_teacher',{p_section:c.name,p_email:a.email,p_subjects:subs});
+      if(r.error)throw r.error;
+      await refreshAssign(c);toast('Assignment ended today.');
+    }
+  }catch(e){console.error(e);toast('Could not end the assignment: '+(e.message||''));}
   render();
 }
 
@@ -1738,6 +2187,8 @@ function viewMain(){
   if(ui.view==='newsec')return viewNewSections();
   if(ui.view==='class')return viewClass();
   if(ui.view==='classes')return viewClasses();
+  if(ui.view==='sections')return viewSections();
+  if(ui.view==='sectiondetail')return viewSectionDetail();
   if(ui.view==='teachers')return viewTeacherPage();
   if(ui.view==='assign')return viewQuickAssign();
   return viewHome();
@@ -1828,7 +2279,7 @@ function render(){
 function snapshotDay(c){return JSON.stringify(dayOf(c.id,ui.date));}
 function restoreUndo(cid,date,prev){return function(){setDay(cid,date,JSON.parse(prev));toastEl.hidden=true;render();};}
 function resetGen(){ui.gen={from:'',to:'',step:'1',skip:''};}
-document.addEventListener('click',function(e){
+document.addEventListener('click',async function(e){
   var t=e.target.closest('[data-act]');if(!t)return;
   var act=t.getAttribute('data-act'),c=ui.cid?cls():null;
   switch(act){
@@ -1911,9 +2362,28 @@ document.addEventListener('click',function(e){
     case 'tecancel':ui.tp.edit=null;ui.tp.emsg='';render();break;
     case 'tpaddopen':ui.tp.addOpen=true;ui.tp.msg='';render();var tn=document.getElementById('tpName');if(tn)tn.focus();break;
     case 'tpaddclose':ui.tp.addOpen=false;ui.tp.msg='';render();break;
-    case 'tpassign':{var tc=S.classes[ui.tp.cid];if(!tc){ui.asg.msg='Choose a register first.';render();break;}
-      var tx=tById(ui.tp.open);if(!tx||!tx.email){ui.asg.msg='This teacher needs a login first.';render();break;}ui.asg.email=tx.email;ui.asg.from=ui.tp.from||todayISO();ui.asg.msg='';
-      addAssignment(tc).then(function(){if(!ui.asg.msg){ui.tp.cid='';render();}});break;}
+    case 'tpassign':{
+      var tx=tById(ui.tp.open);
+      var em=(tx&&tx.email)||t.getAttribute('data-em')||'';
+      if(!em){ui.asg.msg='This teacher needs a login first.';render();break;}
+      var allSecs=allSections();
+      var curSecK=ui.tp.secK||(allSecs.length?allSecs[0].key:'');
+      if(!curSecK){ui.asg.msg='Choose a section first.';render();break;}
+      var parts=curSecK.split('|');
+      var secName=(parts[0]+' · '+parts[1]).slice(0,200);
+      var fromD=ui.tp.from||todayISO();
+      var sub=ui.tp.subSel?[ui.tp.subSel]:null;
+      ui.asg.msg='';
+      try{
+        var r=await sb.rpc('assign_teacher',{p_section:secName,p_email:em.toLowerCase().trim(),p_from:fromD,p_subjects:sub});
+        if(r.error)throw r.error;
+        toast('Assigned '+teacherLabel(em)+' to '+parts[1]+(ui.tp.subSel?' ('+ui.tp.subSel+')':'')+'.');
+        await loadAll();
+      }catch(e){
+        console.error(e);
+        ui.asg.msg=e.message||'Could not assign teacher.';
+      }
+      render();break;}
     case 'tpremove':{var tr=t.getAttribute('data-k');
       if(ui.tp.armed!==tr){ui.tp.armed=tr;render();break;}
       ui.tp.armed='';removeTeacher(tr);break;}
@@ -1983,10 +2453,19 @@ document.addEventListener('click',function(e){
       dc.sections.forEach(function(s){s.name=s.name.trim().replace(/^section\s+/i,'');var nm=s.name.toUpperCase();if(!nm)bad='Give every section a name.';else if(seen[nm])bad='Two sections are both called '+s.name.trim()+'.';seen[nm]=1;});
       if(bad){toast(bad);break;}
       var base=dc.year+' · '+draftProgName(),made=0;
-      dc.sections.forEach(function(s){
-        var nm=base+' · Section '+s.name.trim();
-        dc.subjects.forEach(function(sub){dbCreateClass(newClass(nm,sub,'',[]));made++;});
-      });
+      for(var i=0;i<dc.sections.length;i++){
+        var s=dc.sections[i];
+        var nm=(base+' · Section '+s.name.trim()).slice(0,200);
+        try{
+          var r=await sb.rpc('create_section',{p_name:nm,p_subjects:dc.subjects});
+          if(r.error)throw r.error;
+          made+=dc.subjects.length;
+        }catch(e){
+          console.error(e);
+          toast(e.message||'Could not create section '+s.name);
+        }
+      }
+      await loadAll();
       ui.open=ui.open||{};ui.open['h|'+base]=true;
       ui.draft=null;ui.view='classes';ui.lastTop='classes';ui.cid=null;ui.cFilter=dc.year;window.scrollTo(0,0);render();
       toast(made+' register'+(made===1?'':'s')+' created for '+base+'. Now use Add students on each section.');break;}
@@ -1998,14 +2477,37 @@ document.addEventListener('click',function(e){
       var gr2=genResult(c.students);if(gr2.error){toast(gr2.msg);break;}
       var add=parseStudents(ui.addText,c.students),have={};
       c.students.concat(add).forEach(function(s){have[s.roll]=1;});
-      gr2.list.forEach(function(r2){if(!have[r2]){have[r2]=1;add.push({id:newId(),roll:r2,name:''});}});
+      gr2.list.forEach(function(r2){if(!have[r2]){have[r2]=1;add.push({roll:r2,name:''});}});
       if(!add.length){toast('Type, paste or generate at least one student.');break;}
-      add.forEach(function(s){s.idx=c.nextIdx++;});
-      c.students=c.students.concat(add);dbAddStudents(c,add);ui.addText='';resetGen();render();
-      toast(add.length+' student'+(add.length===1?'':'s')+' added.');break;}
+      var added=0,fail=[];
+      for(var i=0;i<add.length;i++){
+        var r=await sb.rpc('add_student',{p_section:c.name,p_roll:add[i].roll,p_name:add[i].name||''});
+        if(r.error)fail.push(add[i].roll+': '+(r.error.message||'failed'));
+        else added++;
+      }
+      ui.addText='';resetGen();
+      if(added>0)await loadAll();
+      if(fail.length)toast('Added '+added+' student'+(added===1?'':'s')+'. Failed: '+fail.join('; '));
+      else toast(added+' student'+(added===1?'':'s')+' added.');
+      render();break;}
     case 'rmstudent':{
       var key='s'+t.getAttribute('data-sid');
-      if(ui.confirm===key){var rid=t.getAttribute('data-sid');c.students=c.students.filter(function(s){return s.id!==rid;});dbDeleteStudent(rid);ui.confirm=null;}
+      if(ui.confirm===key){
+        var rid=t.getAttribute('data-sid');
+        var stObj=c.students.filter(function(s){return s.id===rid;})[0];
+        if(stObj){
+          try{
+            var r=await sb.rpc('remove_student',{p_section:c.name,p_roll:stObj.roll});
+            if(r.error)throw r.error;
+            toast('Student '+stObj.roll+' removed from section.');
+            await loadAll();
+          }catch(e){
+            console.error(e);
+            toast('Could not remove student: '+(e.message||''));
+          }
+        }
+        ui.confirm=null;
+      }
       else ui.confirm=key;
       render();break;}
     case 'delclass':
@@ -2015,6 +2517,137 @@ document.addEventListener('click',function(e){
     case 'exportcsv':exportCsv();break;
     case 'mxdo':exportMonth();break;
     case 'mxlock':toggleMonth();break;
+    case 'secfilteryear':ui.secM.filterYear=t.getAttribute('data-v');render();break;
+    case 'secopen':{
+      ui.secM.openSec=t.getAttribute('data-k');
+      ui.secM.renameOpen=false;ui.secM.delConfirm=false;ui.secM.stAddOpen=false;
+      ui.secM.bulkOpen=false;ui.secM.tPickOpen=false;ui.secM.editRoll=null;ui.secM.armedRoll=null;
+      ui.view='sectiondetail';window.scrollTo(0,0);render();break;}
+    case 'seccreateopen':ui.secM.createOpen=!ui.secM.createOpen;ui.secM.createMsg='';render();break;
+    case 'seccreatecancel':ui.secM.createOpen=false;ui.secM.createMsg='';render();break;
+    case 'seccreate':{
+      var cErr=await createSectionInProgram(ui.secM.createHead,ui.secM.createName);
+      if(cErr){ui.secM.createMsg=cErr;render();}
+      else{
+        var scV=ui.secM.createName.trim().replace(/^section\s+/i,'');
+        toast('Section '+scV+' created.');
+        ui.secM.createOpen=false;ui.secM.createName='';ui.secM.createMsg='';
+        ui.secM.openSec=ui.secM.createHead+'|Section '+scV;
+        ui.view='sectiondetail';render();
+      }
+      break;}
+    case 'secrenameopen':ui.secM.renameOpen=true;ui.secM.renameVal='';ui.secM.renameMsg='';render();break;
+    case 'secrenamecancel':ui.secM.renameOpen=false;ui.secM.renameMsg='';render();break;
+    case 'secrenamesave':{
+      var pRn=ui.secM.openSec.split('|'),hdRn=pRn[0],scRn=pRn[1];
+      var rnErr=await renameSection(hdRn,scRn,ui.secM.renameVal);
+      if(rnErr){ui.secM.renameMsg=rnErr;render();}
+      else{
+        var newV='Section '+ui.secM.renameVal.trim().replace(/^section\s+/i,'');
+        toast(scRn+' renamed to '+newV+'.');
+        ui.secM.openSec=hdRn+'|'+newV;
+        ui.secM.renameOpen=false;ui.secM.renameMsg='';render();
+      }
+      break;}
+    case 'secdelopen':ui.secM.delConfirm=true;render();break;
+    case 'secdelcancel':ui.secM.delConfirm=false;render();break;
+    case 'secdeldo':{
+      var pDl=ui.secM.openSec.split('|'),hdDl=pDl[0],scDl=pDl[1];
+      try{
+        await deleteSection(hdDl,scDl);
+        toast(scDl+' deleted. Students and attendance are safely kept in archive.');
+        ui.secM.delConfirm=false;ui.secM.openSec='';ui.view='sections';
+      }catch(e){
+        console.error(e);
+        toast('Could not delete section: '+(e.message||''));
+      }
+      render();break;}
+    case 'secstaddopen':ui.secM.stAddOpen=true;ui.secM.bulkOpen=false;ui.secM.stMsg='';render();break;
+    case 'secstaddcancel':ui.secM.stAddOpen=false;ui.secM.stMsg='';render();break;
+    case 'secstaddsave':{
+      var pSt=ui.secM.openSec.split('|'),hdSt=pSt[0],scSt=pSt[1];
+      var stAddErr=await addStudentToSection(hdSt,scSt,ui.secM.stRoll,ui.secM.stName);
+      if(stAddErr){ui.secM.stMsg=stAddErr;render();}
+      else{
+        toast('Student '+ui.secM.stRoll+' added.');
+        ui.secM.stRoll='';ui.secM.stName='';ui.secM.stMsg='';ui.secM.stAddOpen=false;render();
+      }
+      break;}
+    case 'secbulkopen':ui.secM.bulkOpen=true;ui.secM.stAddOpen=false;ui.secM.stMsg='';render();break;
+    case 'secbulkcancel':ui.secM.bulkOpen=false;ui.secM.stMsg='';render();break;
+    case 'secbulksave':{
+      var pBk=ui.secM.openSec.split('|'),hdBk=pBk[0],scBk=pBk[1];
+      var bRes=await bulkAddStudentsToSection(hdBk,scBk,ui.secM.bulkText);
+      if(bRes.error){
+        ui.secM.stMsg=(bRes.count?'Added '+bRes.count+' students. ':'')+bRes.error;
+        if(bRes.count)toast('Added '+bRes.count+' students with errors: '+bRes.error);
+        render();
+      }else{
+        toast(bRes.count+' student'+(bRes.count===1?'':'s')+' added.'+(bRes.skipped?' ('+bRes.skipped+' duplicates skipped)':''));
+        ui.secM.bulkText='';ui.secM.bulkOpen=false;ui.secM.stMsg='';render();
+      }
+      break;}
+    case 'secstedit':{
+      var stR=t.getAttribute('data-r');
+      var pEd=ui.secM.openSec.split('|'),hdEd=pEd[0],scEd=pEd[1];
+      var regsEd=regsOf(hdEd,scEd),baseEd=regsEd[0];
+      var stEd=(baseEd.students||[]).filter(function(s){return s.roll===stR;})[0];
+      if(stEd){ui.secM.editRoll=stR;ui.secM.editRollVal=stEd.roll;ui.secM.editNameVal=stEd.name||'';}
+      render();break;}
+    case 'secsteditcancel':ui.secM.editRoll=null;render();break;
+    case 'secsteditsave':{
+      var pSv=ui.secM.openSec.split('|'),hdSv=pSv[0],scSv=pSv[1];
+      var edErr=editStudentInSection(hdSv,scSv,ui.secM.editRoll,ui.secM.editRollVal,ui.secM.editNameVal);
+      if(edErr){toast(edErr);}
+      else{toast('Student updated.');ui.secM.editRoll=null;render();}
+      break;}
+    case 'secstrmcancel':ui.secM.armedRoll=null;render();break;
+    case 'secstrm':{
+      var rRm=t.getAttribute('data-r');
+      if(ui.secM.armedRoll===rRm){
+        var pRm=ui.secM.openSec.split('|'),hdRm=pRm[0],scRm=pRm[1];
+        try{
+          await removeStudentFromSection(hdRm,scRm,rRm);
+          toast('Student '+rRm+' removed.');
+        }catch(e){
+          console.error(e);
+          toast('Could not remove student: '+(e.message||''));
+        }
+        ui.secM.armedRoll=null;
+      }else{ui.secM.armedRoll=rRm;}
+      render();break;}
+    case 'sectpickopen':ui.secM.tPickOpen=true;ui.secM.selectedTids={};ui.secM.subSel='';ui.secM.tMsg='';render();break;
+    case 'sectpickcancel':ui.secM.tPickOpen=false;ui.secM.selectedTids={};ui.secM.subSel='';ui.secM.tMsg='';render();break;
+    case 'sectchchk':{
+      var chkEm=t.getAttribute('data-em');
+      if(t.checked)ui.secM.selectedTids[chkEm]=true;
+      else delete ui.secM.selectedTids[chkEm];
+      break;}
+    case 'secassignsave':{
+      var emails=Object.keys(ui.secM.selectedTids).filter(function(em){return ui.secM.selectedTids[em];});
+      if(!emails.length){ui.secM.tMsg='Select at least one teacher.';render();break;}
+      var pAsg=ui.secM.openSec.split('|'),hdAsg=pAsg[0],scAsg=pAsg[1];
+      var subSel=ui.secM.subSel?[ui.secM.subSel]:null;
+      try{
+        await assignTeachersToSection(hdAsg,scAsg,emails,ui.secM.tFrom,subSel);
+        toast('Assigned '+emails.length+' teacher'+(emails.length===1?'':'s')+' to '+scAsg+(ui.secM.subSel?' ('+ui.secM.subSel+')':'')+'.');
+        ui.secM.tPickOpen=false;ui.secM.selectedTids={};ui.secM.subSel='';ui.secM.tMsg='';
+      }catch(e){
+        console.error(e);
+        ui.secM.tMsg=e.message||'Could not assign teacher.';
+      }
+      render();break;}
+    case 'secunassign':{
+      var unEm=t.getAttribute('data-em');
+      var pUn=ui.secM.openSec.split('|'),hdUn=pUn[0],scUn=pUn[1];
+      try{
+        await removeTeacherFromSection(hdUn,scUn,unEm);
+        toast('Removed '+teacherLabel(unEm)+' from '+scUn+'.');
+      }catch(e){
+        console.error(e);
+        toast('Could not remove teacher: '+(e.message||''));
+      }
+      render();break;}
   }
 });
 document.addEventListener('keydown',function(e){
@@ -2068,10 +2701,30 @@ document.addEventListener('input',function(e){
       if(gi){gi.textContent=gres.msg;gi.className='hint'+(gres.error?' warn':'');}
       break;}
     case 'addIn':{ui.addText=t.value;var c=cls(),el2=document.getElementById('addCount');if(c&&el2)el2.textContent=t.value.trim()?parseStudents(t.value,c.students).length+' to add.':'Pasting two columns from Excel or Sheets works too.';}break;
+    case 'secCreateName':ui.secM.createName=t.value;break;
+    case 'secRenameVal':ui.secM.renameVal=t.value;break;
+    case 'secStRoll':ui.secM.stRoll=t.value;break;
+    case 'secStName':ui.secM.stName=t.value;break;
+    case 'secBulkIn':{
+      ui.secM.bulkText=t.value;
+      var elPr=document.getElementById('secBulkPreview');
+      if(elPr&&ui.secM.openSec){
+        var pB2=ui.secM.openSec.split('|'),rB2=regsOf(pB2[0],pB2[1]);
+        elPr.textContent=secBulkPreviewText(rB2.length?rB2[0]:null,t.value);
+      }
+      break;}
+    case 'secEditRollVal':ui.secM.editRollVal=t.value;break;
+    case 'secEditNameVal':ui.secM.editNameVal=t.value;break;
   }
 });
 document.addEventListener('change',function(e){
   var t=e.target,c=ui.cid?cls():null,f=t.getAttribute&&t.getAttribute('data-field');
+  if(t.id==='secProgFilter'){ui.secM.filterProg=t.value;render();return;}
+  if(t.id==='secCreateHead'){ui.secM.createHead=t.value;return;}
+  if(t.id==='secTSubs'){ui.secM.subSel=t.value;return;}
+  if(t.id==='secTFrom'){ui.secM.tFrom=t.value;return;}
+  if(t.id==='tpSecSel'){ui.tp.secK=t.value;ui.tp.subSel='';render();return;}
+  if(t.id==='tpSubSel'){ui.tp.subSel=t.value;return;}
   if(t.id==='dateIn'){var nd0=t.value||todayISO();if(isFuture(nd0)){nd0=todayISO();toast('Future dates cannot be marked.');}else if(closedFor(nd0)){toast(closedNote(nd0));nd0=closedFor(ui.date)?todayISO():ui.date;}ui.date=nd0;render();return;}
   if(t.id==='totalsFile'){if(isMgr()&&t.files&&t.files[0])readTotalsFile(t.files[0]);return;}
   if(t.id==='draftProg'){ui.draft.prog=t.value;ui.draft.subjects=t.value&&t.value!=='Other'?defaultSubjects(t.value,ui.draft.year):[];render();if(t.value==='Other'){var on=document.getElementById('draftName');if(on)on.focus();}return;}
