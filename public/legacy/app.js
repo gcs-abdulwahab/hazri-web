@@ -892,7 +892,14 @@ function mergePlan(head,from,to){
   var fillIn=dst.filter(function(c){return !srcSubs[c.subject.toLowerCase()];});
   var srcStudents=src.length?src[0].students:[],dstRolls={};
   (dst[0]?dst[0].students:[]).forEach(function(s){dstRolls[s.roll]=1;});
-  return {src:src,dst:dst,pairs:pairs,moveOver:moveOver,fillIn:fillIn,students:srcStudents.length,clash:srcStudents.filter(function(s){return dstRolls[s.roll];}).length};
+  /* Monthly totals can only be combined when both registers recorded the same lectures delivered that month. */
+  var monthClash=[];
+  pairs.forEach(function(p){
+    var sm=(S.mt&&S.mt[p[0].id])||{},dm=(S.mt&&S.mt[p[1].id])||{};
+    Object.keys(sm).forEach(function(m){var se=sm[m],de=dm[m];
+      if(de&&Object.keys(se.att||{}).length&&se.delivered!==de.delivered)monthClash.push({subject:p[0].subject||'Register',month:m,from:se.delivered,to:de.delivered});});
+  });
+  return {src:src,dst:dst,pairs:pairs,moveOver:moveOver,fillIn:fillIn,students:srcStudents.length,clash:srcStudents.filter(function(s){return dstRolls[s.roll];}).length,monthClash:monthClash};
 }
 function mergeForm(M){
   var others=regsOf(M.head).map(function(c){return splitName(c.name).sec;}).filter(function(s,i,a){return s&&s!==M.from&&a.indexOf(s)===i;}).sort();
@@ -903,13 +910,16 @@ function mergeForm(M){
       (P.moveOver.length?'<li>'+esc(P.moveOver.map(function(c){return c.subject;}).join(', '))+' '+(P.moveOver.length===1?'is':'are')+' only in '+esc(M.from)+', so '+(P.moveOver.length===1?'it moves':'they move')+' across, and '+esc(M.to)+'’s students are added to '+(P.moveOver.length===1?'it':'them')+'.</li>':'')+
       (P.fillIn.length&&P.students?'<li>'+esc(P.fillIn.map(function(c){return c.subject;}).join(', '))+' '+(P.fillIn.length===1?'is':'are')+' only in '+esc(M.to)+'; the moved students are added there too.</li>':'')+
       (P.clash?'<li class="warn">'+P.clash+' roll number'+(P.clash===1?' is':'s are')+' used in both sections. Both students are kept; check them afterwards.</li>':'')+
+      (P.monthClash.length?'<li class="warn">Cannot merge yet: the lectures delivered differ for '+esc(P.monthClash.map(function(x){return x.subject+' in '+fmtMonth(x.month)+' ('+x.from+' in '+M.from+', '+x.to+' in '+M.to+')';}).join('; '))+'. Make them match in Attendance first.</li>':'')+
       '<li>'+esc(M.from)+' is then removed. Teacher assignments for '+esc(M.to)+' stay as they are.</li></ul>';
   }
-  return h+'<div class="row"><button class="btn primary" data-act="mgdo"'+(!M.to||M.busy?' disabled':'')+'>'+(M.busy?'Merging…':'Merge sections')+'</button><button class="btn" data-act="mgcancel"'+(M.busy?' disabled':'')+'>Cancel</button></div></div>';
+  var blocked=M.to&&mergePlan(M.head,M.from,M.to).monthClash.length;
+  return h+'<div class="row"><button class="btn primary" data-act="mgdo"'+(!M.to||M.busy||blocked?' disabled':'')+'>'+(M.busy?'Merging…':'Merge sections')+'</button><button class="btn" data-act="mgcancel"'+(M.busy?' disabled':'')+'>Cancel</button></div></div>';
 }
 function mergeSections(){
   var M=ui.mg;if(!M||!M.to||M.busy)return;
   var P=mergePlan(M.head,M.from,M.to),toName=M.head+' · '+M.to,snapshot=P.src.length?P.src[0].students.slice():[],dstSnap=P.dst.length?P.dst[0].students.slice():[];
+  if(P.monthClash.length){toast('Cannot merge: lectures delivered differ between the sections for some months.');return;}
   M.busy=true;render();
   run(async function(){
     try{
@@ -922,11 +932,27 @@ function mergeSections(){
           chk(await sb.from('classes').update({next_idx:d.nextIdx}).eq('id',d.id));
           d.students=d.students.concat(moved);s.students=[];
         }
+        /* Daily marks: the students now belong to the target register, so save_day finds their new positions. */
         var days=S.att[s.id]||{};
         var dt=S.att[d.id]||(S.att[d.id]={});
-        for(var date in days){dt[date]=Object.assign({},dt[date]||{},days[date]);await saveDay(d.id,date);}
-        chk(await sb.from('classes').delete().eq('id',s.id));
-        delete S.classes[s.id];delete S.att[s.id];
+        for(var date in days){
+          var dayMarks=days[date];if(!Object.keys(dayMarks).length)continue;
+          chk(await sb.rpc('save_day',{p_class:d.id,p_day:date,p_changes:dayMarks}));
+          dt[date]=Object.assign({},dt[date]||{},dayMarks);
+        }
+        /* Monthly totals: add the moved students' lectures attended to the target register's month. */
+        S.mt=S.mt||{};
+        var sm=S.mt[s.id]||{},dm=S.mt[d.id]||(S.mt[d.id]={});
+        for(var mo in sm){
+          var se=sm[mo],mAtt=se.att||{};if(!Object.keys(mAtt).length)continue;
+          var de=dm[mo],del=de?de.delivered:se.delivered;
+          chk(await sb.rpc('save_month',{p_class:d.id,p_month:mo,p_delivered:del,p_changes:mAtt}));
+          dm[mo]={delivered:del,att:Object.assign({},de?de.att:{},mAtt),by:ui.email,at:new Date().toISOString()};
+        }
+        /* Archive rather than delete when possible, so the source register's rows are never cascaded away. */
+        if(ui.canArchive)chk(await sb.from('classes').update({archived_at:new Date().toISOString()}).eq('id',s.id));
+        else chk(await sb.from('classes').delete().eq('id',s.id));
+        delete S.classes[s.id];delete S.att[s.id];delete S.mt[s.id];
       }
       for(var j=0;j<P.moveOver.length;j++){var mc=P.moveOver[j];mc.name=toName.slice(0,200);chk(await sb.from('classes').update({name:mc.name}).eq('id',mc.id));
         if(dstSnap.length){safeNext(mc);var addT=dstSnap.map(function(st){return {id:newId(),roll:st.roll,name:st.name||'',idx:mc.nextIdx++};});await insertStudents(mc.id,addT);chk(await sb.from('classes').update({next_idx:mc.nextIdx}).eq('id',mc.id));mc.students=mc.students.concat(addT);}}
