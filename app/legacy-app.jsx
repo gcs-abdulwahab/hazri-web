@@ -43,7 +43,7 @@ export default function LegacyApp() {
 
   return (
     <>
-      <div id="app" />
+      <div className="wrap" id="app" />
       <div className="toast" id="toast" role="status" hidden />
       {loadError && (
         <p role="alert" style={{ textAlign: "center", padding: "2rem" }}>
