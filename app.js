@@ -1400,7 +1400,7 @@ function viewSections(){
         '<div class="sec-header"><h2 style="margin:0">'+esc(s.sec)+'</h2><span class="chip '+(s.studentsCount?'P':'')+'">'+s.studentsCount+' student'+(s.studentsCount===1?'':'s')+'</span></div>'+
         '<div class="cc-sub">'+esc(s.head)+' · '+s.regs.length+' subject register'+(s.regs.length===1?'':'s')+'</div>'+
         '<div class="tchip-list" style="margin-top:4px">'+
-        (tchs.length?tchs.map(function(em){return '<span class="chip blue">🧑‍🏫 '+esc(teacherLabel(em))+'</span>';}).join(''):'<span class="chip L">No teachers assigned</span>')+
+        (tchs.length?tchs.map(function(em){return '<span class="chip blue"> '+esc(teacherLabel(em))+'</span>';}).join(''):'<span class="chip L">No teachers assigned</span>')+
         '</div>'+
         '</button></li>';
     }).join('')+'</ul>';
