@@ -238,3 +238,11 @@ td.nm{white-space:normal;min-width:130px;max-width:190px;overflow-wrap:anywhere;
 .combo-opt:hover{background:var(--surface2)}
 .combo-opt[aria-selected="true"]{background:var(--accent-tint);color:var(--accent)}
 .combo-none{padding:9px 10px;color:var(--muted)}
+
+/* Sections manager area */
+.sec-card{width:100%;text-align:left;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:grid;gap:8px}
+.sec-card:hover{border-color:var(--accent)}
+.tchip-list{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.chip.blue{background:var(--accent-tint);color:var(--accent)}
+.sec-header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+

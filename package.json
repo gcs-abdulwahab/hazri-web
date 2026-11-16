@@ -1,12 +1,22 @@
 {
-  "name": "hazri-register",
+  "name": "hazri-web",
   "version": "1.0.0",
   "private": true,
+  "description": "Hazri Register - Modern Attendance Management System for College Teachers and Administration",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start"
   },
+  "keywords": [
+    "attendance",
+    "hazri",
+    "supabase",
+    "college-management",
+    "education"
+  ],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
     "next": "16.4.6",
     "react": "19.3.1",
